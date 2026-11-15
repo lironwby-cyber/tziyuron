@@ -16,6 +16,7 @@ export function startMock(port) {
   const wants = [];
   const flags = { hint: false, familyInvites: false }; // hint: does art_animation_jobs have the hint column yet; familyInvites: is migration 006 on the server yet
   const familyInvites = [];
+  const recovers = []; // password-reset emails that would have been sent
   // The backup to pCloud: off (as before migration 005) until a test turns it on. `hold` keeps files waiting.
   const backup = { enabled: false, connected: false, problem: false, hold: false, done: new Set(), failed: new Set(), sweeps: [], connects: 0, last: null };
   const backupOwner = () => (t.art_child_members[0] || {}).user_id;
@@ -90,14 +91,28 @@ export function startMock(port) {
         return send(res, 200, tokenFor(u, b.email));
       }
       if (path === '/auth/v1/logout') return send(res, 204);
+      // A forgotten password: the answer is the same whether or not the account exists; one request a minute per address.
+      if (path === '/auth/v1/recover') {
+        const b = json();
+        if (recovers.some((r) => r.email === b.email && Date.now() - r.at < 60000)) return send(res, 429, { error_code: 'over_email_send_rate_limit', msg: 'For security purposes, you can only request this after 60 seconds.' });
+        recovers.push({ email: b.email, redirect: url.searchParams.get('redirect_to'), at: Date.now() });
+        return send(res, 200, {});
+      }
 
       const auth = (req.headers.authorization || '').replace('Bearer tok-', '');
       const uid = [...users.values()].some((u) => u.id === auth) ? auth : null;
       if (!uid) return send(res, 401, { message: 'JWT missing' });
       if (path === '/auth/v1/user') {
         const me = [...users.values()].find((u) => u.id === uid);
-        if (req.method === 'PUT') me.meta = { ...(me.meta || {}), ...(json().data || {}) };
-        return send(res, 200, { id: uid, user_metadata: me.meta || {} });
+        if (req.method === 'PUT') {
+          const b = json();
+          if (b.password !== undefined) {
+            if (String(b.password).length < 6) return send(res, 422, { error_code: 'weak_password', msg: 'Password should be at least 6 characters.' });
+            me.password = b.password;
+          }
+          me.meta = { ...(me.meta || {}), ...(b.data || {}) };
+        }
+        return send(res, 200, { id: uid, email: [...users].find(([, u]) => u === me)[0], user_metadata: me.meta || {} });
       }
 
       if (path === '/rest/v1/rpc/art_backup_status') {
@@ -279,5 +294,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, familyInvites, backup, backupRun, users })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, familyInvites, recovers, backup, backupRun, users })));
 }

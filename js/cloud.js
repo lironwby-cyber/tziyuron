@@ -129,6 +129,37 @@ export async function signUp(email, password) {
   return { confirm: true };
 }
 
+/** Sends the account's email a link that opens `backTo` with a one-time recovery token. Says nothing about whether the account exists. */
+export async function recoverPassword(email, backTo) {
+  await authCall(`recover?redirect_to=${encodeURIComponent(backTo)}`, { email });
+}
+
+/**
+ * What an email link brought back in the address: '#access_token=…&type=recovery' or '#error=…'.
+ * Returns { type, access_token, refresh_token, expires_in } | { error } | null.
+ */
+export function readAuthHash(hash) {
+  const h = String(hash || '').replace(/^#\/?/, '');
+  if (!/(^|&)(access_token|error|error_code)=/.test(h)) return null;
+  const q = new URLSearchParams(h);
+  if (q.get('error') || q.get('error_code')) return { error: q.get('error_code') || q.get('error') };
+  if (!q.get('access_token')) return null;
+  return { type: q.get('type') || '', access_token: q.get('access_token'), refresh_token: q.get('refresh_token') || '', expires_in: Number(q.get('expires_in')) || 3600 };
+}
+
+/** Sets a new password with the token of a recovery link, and only then signs in on this device. */
+export async function finishRecovery(link, password) {
+  const res = await fetch(config.url + '/auth/v1/user', {
+    method: 'PUT',
+    headers: { apikey: config.key, Authorization: `Bearer ${link.access_token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  const me = await parse(res);
+  saveSession(sessionFrom({ access_token: link.access_token, refresh_token: link.refresh_token, expires_in: link.expires_in, user: me }));
+  await seedOutbox();
+  return session.user;
+}
+
 /** Is this the signed-in account's password? Changes nothing: used to let a parent reset a forgotten kids-mode code. */
 export async function verifyPassword(password) {
   if (!session || !session.user.email) return false;

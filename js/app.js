@@ -268,7 +268,7 @@ function renderHome() {
   const total = state.memories.length;
   const sinceBackup = Date.now() - (state.settings.lastBackupAt || 0);
   const nagHidden = Date.now() - (state.settings.backupNagDismissedAt || 0) < 7 * 864e5;
-  const showNag = total >= 5 && sinceBackup > 30 * 864e5 && !nagHidden;
+  const showNag = total >= 5 && sinceBackup > 30 * 864e5 && !nagHidden && !cloud.signedIn(); // signed in: the drawings are in the family archive too
   const hasArt = list.some((m) => m.image);
 
   return `${header({ actions: `<button class="icon-btn" data-go="settings" aria-label="הגדרות">${ICONS.settings}</button>`, below: kidsStripHtml() })}
@@ -505,8 +505,10 @@ function renderBook() {
 function backupAlertHtml() {
   const b = state._backup;
   if (!cloud.signedIn() || !b || b === 'error' || !b.owner) return '';
-  if (b.connected && !b.problem && !b.failed) return '';
-  const text = !b.connected ? 'הגיבוי ל-pCloud עוד לא מחובר.' : b.problem ? 'הגיבוי ל-pCloud נעצר: צריך לחבר מחדש.' : 'חלק מהקבצים לא הועתקו ל-pCloud.';
+  // "Not connected yet" is said in the settings only (Liron, 15/11/2026). The home screen speaks up only when a
+  // backup that was working has stopped, because then new drawings are no longer being copied.
+  if (!b.connected || (!b.problem && !b.failed)) return '';
+  const text = b.problem ? 'הגיבוי ל-pCloud נעצר: צריך לחבר מחדש.' : 'חלק מהקבצים לא הועתקו ל-pCloud.';
   return `<div class="banner" data-backup-alert>${art('chest')}
     <div class="grow"><b>${text}</b> <span class="small">מה שהמשפחה מעלה שמור רק בארכיון המשפחתי.</span></div>
     <button class="btn sunny" data-go="settings">להגדרות</button></div>`;
@@ -1083,7 +1085,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.9</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.10</p>
   </main>`;
 }
 
@@ -2250,9 +2252,36 @@ function openSignIn() {
           <button class="btn sunny" type="submit" data-mode="in">כניסה</button>
           <button class="btn" type="submit" data-mode="up">חשבון חדש</button>
         </div>
+        <button class="btn ghost" type="button" data-forgot-pass>שכחתי סיסמה</button>
       </form>`;
     const form = $('form', body);
     const err = $('[data-err]', body);
+    form.addEventListener('input', () => { err.textContent = ''; });
+    $('[data-forgot-pass]', body).addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const email = String(form.elements.email.value || '').trim();
+      if (!/^\S+@\S+\.\S+$/.test(email)) { err.textContent = 'מקלידים את האימייל למעלה, ואז לוחצים שוב "שכחתי סיסמה".'; form.elements.email.focus(); return; }
+      btn.disabled = true;
+      err.textContent = '';
+      try {
+        await cloud.recoverPassword(email, location.origin + location.pathname);
+        body.innerHTML = `
+          <h2>שלחנו קישור לאיפוס</h2>
+          <p class="muted">אם יש חשבון עם האימייל <b dir="ltr">${esc(email)}</b>, נשלח אליו עכשיו מייל עם קישור לבחירת סיסמה חדשה.</p>
+          <ul class="plain-steps">
+            <li>המייל מגיע באנגלית, מ-Supabase Auth. אם הוא לא מגיע תוך כמה דקות, כדאי לבדוק בספאם.</li>
+            <li>פותחים את הקישור, בוחרים סיסמה חדשה, ונכנסים.</li>
+            <li>הסיסמה החדשה היא גם הסיסמה בעולם הלמידה, כי זה אותו חשבון.</li>
+          </ul>
+          <div class="btn-row"><button class="btn sunny" type="button" data-close>הבנתי</button></div>`;
+        $('[data-close]', body).addEventListener('click', () => close(false));
+      } catch (ex) {
+        err.textContent = ex instanceof TypeError ? 'אין חיבור לרשת.'
+          : ex && ex.status === 429 ? 'כבר נשלח קישור לפני רגע. אפשר לבקש שוב בעוד כמה דקות.'
+          : 'לא הצלחנו לשלוח את הקישור. אפשר לנסות שוב.';
+        btn.disabled = false;
+      }
+    });
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const mode = e.submitter && e.submitter.dataset.mode === 'up' ? 'up' : 'in';
@@ -2284,6 +2313,55 @@ function openSignIn() {
     await cloud.sync();
     return true;
   });
+}
+
+/** The address an email link opened: a recovery link asks for a new password; a dead link says so. The token never stays in the address. */
+async function handleAuthLink() {
+  const link = cloud.readAuthHash(location.hash);
+  if (!link) return;
+  history.replaceState(null, '', '#/');
+  await render();
+  if (link.error) { toast('הקישור לא תקף או שפג תוקפו. אפשר לבקש קישור חדש במסך הכניסה.', 7000); return; }
+  if (link.type !== 'recovery') return;
+  const done = await openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>סיסמה חדשה</h2>
+      <p class="muted">בוחרים סיסמה של 6 תווים לפחות. היא תחליף את הישנה, גם בעולם הלמידה.</p>
+      <form class="form" novalidate>
+        <label class="field"><span>סיסמה חדשה</span><input name="password" type="password" dir="ltr" autocomplete="new-password" minlength="6" required></label>
+        <label class="field"><span>שוב, לאישור</span><input name="again" type="password" dir="ltr" autocomplete="new-password" minlength="6" required></label>
+        <p class="small" data-err role="alert" style="color:var(--red-ink, #b3261e);min-height:1.4em"></p>
+        <div class="btn-row"><button class="btn" type="button" data-cancel>ביטול</button><button class="btn sunny" type="submit">שמירה וכניסה</button></div>
+      </form>`;
+    const form = $('form', body);
+    const err = $('[data-err]', body);
+    $('[data-cancel]', body).addEventListener('click', () => close(false));
+    form.addEventListener('input', () => { err.textContent = ''; });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const password = String(form.elements.password.value || '');
+      if (password.length < 6) { err.textContent = 'הסיסמה צריכה 6 תווים לפחות.'; return; }
+      if (password !== String(form.elements.again.value || '')) { err.textContent = 'שתי הסיסמאות לא זהות.'; return; }
+      $$('button', form).forEach((b) => { b.disabled = true; });
+      try {
+        await cloud.finishRecovery(link, password);
+        close(true);
+      } catch (ex) {
+        err.textContent = ex instanceof TypeError ? 'אין חיבור לרשת.'
+          : ex && (ex.status === 401 || ex.status === 403) ? 'הקישור כבר לא תקף. אפשר לבקש קישור חדש במסך הכניסה.'
+          : ex && ex.status === 422 ? 'הסיסמה לא התקבלה. אפשר לנסות סיסמה אחרת, ארוכה יותר.'
+          : 'לא הצלחנו לשמור את הסיסמה. אפשר לנסות שוב.';
+        $$('button', form).forEach((b) => { b.disabled = false; });
+      }
+    });
+  }, { dialog: true, label: 'סיסמה חדשה' });
+  if (!done) return;
+  toast(isInstalled() ? 'הסיסמה הוחלפה, ונכנסת.' : 'הסיסמה הוחלפה, ונכנסת. אם ציורון מותקן במסך הבית, נכנסים שם עם הסיסמה החדשה.', 7000);
+  await render();
+  await cloud.sync();
+  await load();
+  await render();
+  loadPrefs().then(askModeOnce);
 }
 
 async function openFamilySheet(child) {
@@ -2784,7 +2862,8 @@ async function boot() {
     return;
   }
   if (route().name === 'review' || route().name === 'book') history.replaceState(null, '', '#/');
-  await render();
+  // An email link (a forgotten password) is taken out of the address before anything is drawn.
+  if (cloud.readAuthHash(location.hash)) handleAuthLink(); else await render();
   startCloud();
   if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.__noSW) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

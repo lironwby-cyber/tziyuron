@@ -543,14 +543,14 @@ try {
     await B.locator('[data-backup-head]', { hasText: 'עוד לא מחובר' }).waitFor();
     assert.match(await B.locator('[data-backup-text]').textContent(), /מי שפתח את הארכיון המשפחתי מחבר/);
     assert.equal(await B.locator('[data-act="backup-connect"]').count(), 0, 'a member has no connect button');
-    // The owner is reminded on the home screen; a member is not.
+    // "Not connected yet" is said in the settings only: the home screen stays quiet, for the owner and for a member.
     await A.evaluate(() => window.__tziyuron.refreshBackup());
     await A.goto(BASE);
-    await A.locator('[data-backup-alert]', { hasText: 'הגיבוי ל-pCloud עוד לא מחובר' }).waitFor();
-    await A.screenshot({ path: join(outDir, 'cloud-21-backup-home-alert.png') });
     await B.goto(BASE);
     await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(await A.locator('[data-backup-alert]').count(), 0);
     assert.equal(await B.locator('[data-backup-alert]').count(), 0);
+    await A.screenshot({ path: join(outDir, 'cloud-21-home-no-backup-line.png') });
   });
 
   await check('backup to pCloud: connecting goes to pCloud and back, then every file is copied and the state says so', async () => {
@@ -830,6 +830,72 @@ try {
     assert.equal(await B.evaluate((c) => window.__tziyuron.cloud.acceptInvite(c, 'x').then(() => 'ok', (e) => e.message), code), 'invite is not valid');
     assert.equal(await A.evaluate((c) => (window.__tziyuron.state.settings.invitePhones || {})[c] || null, code), null, 'the number is forgotten with the invitation');
     await A.evaluate(() => { delete navigator.contacts; });
+  });
+
+  await check('forgotten password: the sign-in screen sends a reset link, the link sets a new password and signs in, and the token leaves the address', async () => {
+    const E = await device('E');
+    await E.goto(BASE + '#/settings');
+    await E.getByRole('button', { name: 'כניסה או חשבון חדש' }).click();
+    // With no address typed, nothing is sent.
+    await E.getByRole('button', { name: 'שכחתי סיסמה' }).click();
+    await E.getByText('מקלידים את האימייל למעלה').waitFor();
+    assert.equal(mock.recovers.length, 0);
+    await E.getByLabel('אימייל').fill('savta@example.com');
+    await E.waitForTimeout(300);
+    await E.screenshot({ path: join(outDir, 'cloud-29-forgot-link.png') });
+    await E.getByRole('button', { name: 'שכחתי סיסמה' }).click();
+    await E.getByRole('heading', { name: 'שלחנו קישור לאיפוס' }).waitFor();
+    await E.getByText('savta@example.com').waitFor();
+    assert.equal(mock.recovers.length, 1);
+    assert.equal(mock.recovers[0].email, 'savta@example.com');
+    assert.equal(mock.recovers[0].redirect, BASE, 'the link in the email comes back to this site');
+    await E.waitForTimeout(300);
+    await E.screenshot({ path: join(outDir, 'cloud-30-forgot-sent.png') });
+    await E.getByRole('button', { name: 'הבנתי' }).click();
+    // Asking again within the minute is answered calmly.
+    await E.getByRole('button', { name: 'כניסה או חשבון חדש' }).click();
+    await E.getByLabel('אימייל').fill('savta@example.com');
+    await E.getByRole('button', { name: 'שכחתי סיסמה' }).click();
+    await E.getByText('כבר נשלח קישור לפני רגע').waitFor();
+    assert.equal(mock.recovers.length, 1);
+
+    // The link from the email, as the server sends the browser back.
+    const savta = mock.users.get('savta@example.com');
+    await E.goto('about:blank');
+    await E.goto(`${BASE}#access_token=tok-${savta.id}&expires_in=3600&refresh_token=ref-${savta.id}&token_type=bearer&type=recovery`);
+    const sheet = E.getByRole('dialog', { name: 'סיסמה חדשה' });
+    await sheet.waitFor();
+    assert.ok(!(await E.evaluate(() => location.href)).includes('access_token'), 'the token is out of the address at once');
+    assert.equal(await E.evaluate(() => window.__tziyuron.cloud.signedIn()), false, 'not signed in before a password is chosen');
+    await sheet.getByLabel('סיסמה חדשה').fill('abc');
+    await sheet.getByLabel('שוב, לאישור').fill('abc');
+    await sheet.getByRole('button', { name: 'שמירה וכניסה' }).click();
+    await sheet.getByText('הסיסמה צריכה 6 תווים לפחות.').waitFor();
+    await sheet.getByLabel('סיסמה חדשה').fill('new-secret-1');
+    await sheet.getByLabel('שוב, לאישור').fill('new-secret-2');
+    await sheet.getByRole('button', { name: 'שמירה וכניסה' }).click();
+    await sheet.getByText('שתי הסיסמאות לא זהות.').waitFor();
+    assert.equal(savta.password, 'secret-savta', 'nothing changed yet');
+    await sheet.getByLabel('שוב, לאישור').fill('new-secret-1');
+    await E.waitForTimeout(300);
+    await E.screenshot({ path: join(outDir, 'cloud-31-new-password.png') });
+    await sheet.getByRole('button', { name: 'שמירה וכניסה' }).click();
+    await E.getByText('הסיסמה הוחלפה, ונכנסת.').waitFor();
+    assert.equal(savta.password, 'new-secret-1');
+    await who(E, 'הורה');
+    assert.equal(await E.evaluate(() => window.__tziyuron.cloud.user().email), 'savta@example.com');
+    // The old password no longer signs in, the new one does.
+    assert.equal(await E.evaluate(() => window.__tziyuron.cloud.verifyPassword('secret-savta')), false);
+    assert.equal(await E.evaluate(() => window.__tziyuron.cloud.verifyPassword('new-secret-1')), true);
+    await E.context().close();
+
+    // A link that expired says so, and the address is cleaned as well.
+    const F = await device('F');
+    await F.goto(`${BASE}#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired`);
+    await F.getByText('הקישור לא תקף או שפג תוקפו').waitFor();
+    assert.ok(!(await F.evaluate(() => location.href)).includes('error'));
+    assert.equal(await F.getByRole('dialog').count(), 0);
+    await F.context().close();
   });
 
   await check('sign-out keeps the local copy and stops sending', async () => {
