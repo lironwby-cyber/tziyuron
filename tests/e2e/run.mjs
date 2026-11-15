@@ -267,6 +267,30 @@ try {
     await page.goBack();
   });
 
+  await check('editing a child: a redraw in the middle opens no second form, and saving closes it and returns to the settings', async () => {
+    await page.goto(BASE + '#/settings');
+    await page.getByRole('button', { name: 'עריכה' }).first().click();
+    await page.getByRole('dialog', { name: 'עריכת ילד' }).waitFor();
+    // What a finished sync or the minute tick does while the form is open.
+    await page.evaluate(async () => { await window.__tziyuron.render(); await window.__tziyuron.render(); });
+    assert.equal(await page.getByRole('dialog').count(), 1, 'one form only');
+    const name = await page.getByLabel('שם', { exact: true }).inputValue();
+    await page.getByLabel('שם', { exact: true }).fill(name + ' ב');
+    await page.getByRole('button', { name: 'שמירה' }).click();
+    await page.getByText('נשמר', { exact: true }).waitFor();
+    await page.waitForTimeout(400);
+    assert.equal(await page.getByRole('dialog').count(), 0, 'the form is closed after saving');
+    assert.equal(new URL(page.url()).hash, '#/settings');
+    await page.getByText(name + ' ב').first().waitFor();
+    // Put the name back for the checks that follow.
+    await page.getByRole('button', { name: 'עריכה' }).first().click();
+    await page.getByLabel('שם', { exact: true }).fill(name);
+    await page.getByRole('button', { name: 'שמירה' }).click();
+    await page.waitForTimeout(400);
+    assert.equal(await page.getByRole('dialog').count(), 0);
+    await page.goto(BASE);
+  });
+
   await check('manual crop editor opens and re-processes', async () => {
     await page.locator('[data-mem]').first().click();
     await page.getByRole('button', { name: 'חיתוך מחדש' }).click();

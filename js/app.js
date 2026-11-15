@@ -130,7 +130,11 @@ async function render() {
   }
   else if (r.name === 'review' && state.review) view = renderReview();
   else if (r.name === 'book' && state.book) view = renderBook();
-  else if (r.name === 'child') { openChildForm(r.id === 'new' ? null : childById(r.id)); return; }
+  else if (r.name === 'child') {
+    // A redraw while the form is open (a sync that ended, the minute tick) must not open a second form on top.
+    if (!state._childForm) openChildForm(r.id === 'new' ? null : childById(r.id));
+    return;
+  }
   else view = renderHome();
   APP.innerHTML = view;
   document.title = 'ציורון';
@@ -1466,6 +1470,7 @@ function openChildForm(child) {
   let color = child ? childIndex(child) : state.children.length % KID_COLORS;
   let usePhoto = !!(child && child.avatar);
   let photoUrl = '';
+  state._childForm = true;
   return openSheet((body, close) => {
     body.innerHTML = `
       <h2>${child ? 'עריכת ילד' : 'ילד חדש'}</h2>
@@ -1516,6 +1521,7 @@ function openChildForm(child) {
       close({ name, birthDate: String(fd.get('birthDate') || '') });
     });
   }, { label: child ? 'עריכת ילד' : 'ילד חדש' }).then(async (v) => {
+    state._childForm = false;
     if (!v) { back(child ? 'settings' : ''); return; }
     if (v.delete) {
       const n = state.memories.filter((m) => m.childId === child.id).length;
@@ -2302,7 +2308,7 @@ function startCloud() {
   cloud.onStatus((st) => {
     const line = $('[data-sync-line]');
     if (line && st.syncing) line.textContent = 'מסנכרן…';
-    if (!st.dataChanged) { if (line && !st.syncing) render(); return; }
+    if (!st.dataChanged) { if (line && !st.syncing && !document.querySelector('.scrim')) render(); return; }
     state._stale = true;
     const busy = document.querySelector('.scrim') || state.review || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
     if (!busy) render().then(watchJobs);
