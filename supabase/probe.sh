@@ -17,10 +17,10 @@ create extension pgcrypto schema extensions;
 create table auth.users (id uuid primary key);
 create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
 create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint);
-create table storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text);
+create table storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text, metadata jsonb, created_at timestamptz default now(), updated_at timestamptz default now());
 alter table storage.objects enable row level security;
 grant usage on schema public, auth, storage, extensions to authenticated, anon;
-grant all on storage.objects to authenticated;
+grant all on storage.objects to authenticated, service_role; grant usage on schema storage to service_role;
 -- Like the production project: new tables in public give the API roles no data privileges.
 alter default privileges in schema public grant truncate, references, trigger on tables to authenticated, anon, service_role;
 alter default privileges in schema public revoke execute on functions from public;
@@ -30,6 +30,11 @@ create schema net;
 create table net.calls (id bigserial primary key, url text, body jsonb);
 create function net.http_post(url text, body jsonb, headers jsonb, timeout_milliseconds int default 5000) returns bigint language sql as $$ insert into net.calls (url, body) values (url, body) returning id $$;
 grant usage on schema net to service_role; grant select on net.calls to service_role;
+-- Stand-in for pg_cron: keeps the job's text, so that the probe can run it once by hand.
+create schema cron;
+create table cron.job (jobid bigserial primary key, jobname text unique, schedule text, command text);
+create function cron.schedule(job_name text, schedule text, command text) returns bigint language sql as $$ insert into cron.job (jobname, schedule, command) values (job_name, schedule, command) returning jobid $$;
+create function cron.unschedule(job_name text) returns boolean language plpgsql as $$ begin delete from cron.job where jobname = job_name; if not found then raise exception 'no such job'; end if; return true; end $$;
 S
 run "$P -f $D/001_art_shared_archive.sql"
 # Without 003 a signed-in user is refused before row-level security is even asked.
@@ -48,6 +53,11 @@ run "$P -f $D/004_art_animation_hint.sql"
 run "$P -f $D/probe_checks_004.sql"
 run "$P -f $D/004_rollback.sql"
 run "$P -f $D/004_art_animation_hint.sql"
+run "$P -f $D/005_art_backup.sql"
+run "$P -f $D/probe_checks_005.sql"
+run "$P -f $D/005_rollback.sql"
+run "$P -f $D/005_art_backup.sql"
+run "$P -f $D/005_rollback.sql"
 run "$P -f $D/004_rollback.sql"
 run "$P -f $D/002_rollback.sql"
 run "$P -f $D/002_art_animation_instant.sql"

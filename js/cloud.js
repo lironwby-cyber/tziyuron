@@ -253,6 +253,7 @@ async function pushEntry(e) {
         method: 'POST', body: rec.blob, headers: { 'Content-Type': rec.type || 'application/octet-stream', 'x-upsert': 'true' },
       });
       await mark();
+      sentFiles += 1;
     }
   } else if (e.store === 'memories') {
     await rest(`art_memories?id=eq.${enc(e.rid)}`, { method: 'DELETE' });
@@ -269,6 +270,8 @@ async function pushEntry(e) {
 
 // Children first (files and memories need them), deletions last.
 const ORDER = ['put:children', 'put:blobs', 'put:memories', 'del:memories', 'del:blobs', 'del:children'];
+
+let sentFiles = 0; // files sent to the family archive since the backup was last told
 
 async function push() {
   const entries = await db.getAll('outbox');
@@ -435,6 +438,8 @@ export function sync() {
       } while (again);
       status.error = '';
       status.lastSyncAt = Date.now();
+      // New files are in the archive: tell the backup now, instead of waiting for its 5-minute round.
+      if (sentFiles) { sentFiles = 0; backupSweep().catch(() => {}); }
     } catch (err) {
       console.warn('sync', err);
       status.error = describe(err);
@@ -514,4 +519,43 @@ export async function suggestTitle(memoryId, { route = 'paid', picture = null, w
     title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null, turn,
     motions: Array.isArray(data.motions) ? data.motions : [], reason: data.reason || '',
   };
+}
+
+// ---------- Backup to the owner's pCloud ----------
+/**
+ * How the automatic backup stands for the children this account is attached to:
+ * {connected, owner, total, done, failed, last, problem}, or null when the server has no backup yet.
+ */
+export async function backupStatus() {
+  try {
+    const s = await rest('rpc/art_backup_status', { method: 'POST', body: {} });
+    if (!s || typeof s !== 'object') return null;
+    return {
+      connected: !!s.connected, owner: !!s.owner, problem: !!s.problem,
+      total: Number(s.total) || 0, done: Number(s.done) || 0, failed: Number(s.failed) || 0,
+      last: s.last ? Date.parse(s.last) || 0 : 0,
+    };
+  } catch (err) {
+    if (err && (err.status === 404 || err.code === 'PGRST202')) return null;
+    throw err;
+  }
+}
+
+const backupCall = (body) => call('/functions/v1/art-backup', { method: 'POST', body });
+
+/** Asks the server to copy what is not in pCloud yet. With retry, files that failed are tried again. */
+export async function backupSweep({ retry = false } = {}) {
+  if (!session) return null;
+  return backupCall({ action: 'sweep', ...(retry ? { retry: true } : {}) });
+}
+
+/** The owner starts the one-time connection: resolves to {url} (pCloud's approval page) or {reason}. */
+export async function backupConnect() {
+  const data = (await backupCall({ action: 'connect' })) || {};
+  return typeof data.url === 'string' && data.url.startsWith('https://my.pcloud.com/') ? { url: data.url } : { reason: data.reason || 'failed' };
+}
+
+export async function backupDisconnect() {
+  const data = (await backupCall({ action: 'disconnect' })) || {};
+  return !!data.ok;
 }

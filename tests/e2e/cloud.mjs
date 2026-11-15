@@ -510,6 +510,114 @@ try {
     assert.equal(mock.tables.art_animation_jobs.length, before);
   });
 
+  await check('backup to pCloud: before the server has it, the settings say so and nobody is nagged', async () => {
+    await A.goto(BASE + '#/settings');
+    await A.locator('[data-backup-head]', { hasText: 'עוד לא הופעל' }).waitFor();
+    assert.equal(await A.locator('[data-act="backup-connect"]').count(), 0);
+    await A.goto(BASE);
+    await A.getByRole('button', { name: 'נועה', exact: true }).waitFor();
+    assert.equal(await A.locator('[data-backup-alert]').count(), 0);
+  });
+
+  await check('backup to pCloud: the owner is told it is not connected, a member is told who connects it', async () => {
+    mock.backup.enabled = true;
+    await A.goto(BASE + '#/settings');
+    await A.locator('[data-backup-head]', { hasText: 'עוד לא מחובר' }).waitFor();
+    await A.getByRole('button', { name: 'חיבור pCloud' }).waitFor();
+    await new Promise((r) => setTimeout(r, 600)); await A.evaluate(() => document.querySelector('[data-backup-panel]').scrollIntoView({ block: 'center' }));
+    await A.screenshot({ path: join(outDir, 'cloud-20-backup-not-connected.png') });
+    await B.goto(BASE + '#/settings');
+    await B.locator('[data-backup-head]', { hasText: 'עוד לא מחובר' }).waitFor();
+    assert.match(await B.locator('[data-backup-text]').textContent(), /מי שפתח את הארכיון המשפחתי מחבר/);
+    assert.equal(await B.locator('[data-act="backup-connect"]').count(), 0, 'a member has no connect button');
+    // The owner is reminded on the home screen; a member is not.
+    await A.evaluate(() => window.__tziyuron.refreshBackup());
+    await A.goto(BASE);
+    await A.locator('[data-backup-alert]', { hasText: 'הגיבוי ל-pCloud עוד לא מחובר' }).waitFor();
+    await A.screenshot({ path: join(outDir, 'cloud-21-backup-home-alert.png') });
+    await B.goto(BASE);
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(await B.locator('[data-backup-alert]').count(), 0);
+  });
+
+  await check('backup to pCloud: connecting goes to pCloud and back, then every file is copied and the state says so', async () => {
+    // pCloud's approval page is played by the test: it approves and sends the browser back, as the server function does.
+    await A.route('https://my.pcloud.com/**', (r) => {
+      mock.backup.connected = true;
+      r.fulfill({ status: 200, contentType: 'text/html', body: `<script>location.replace(${JSON.stringify(BASE + '#/settings/backup-ok')})</script>` });
+    });
+    await A.goto(BASE + '#/settings');
+    await A.getByRole('button', { name: 'חיבור pCloud' }).click();
+    await A.locator('[data-backup-head]', { hasText: 'הגיבוי מעודכן' }).waitFor({ timeout: 15000 });
+    assert.equal(mock.backup.connects, 1);
+    assert.equal(new URL(A.url()).hash, '#/settings', 'the return address is cleaned');
+    const total = [...mock.files.keys()].length;
+    assert.ok(total > 0);
+    assert.match(await A.locator('[data-backup-text]').textContent(), new RegExp(`${total} מתוך ${total} קבצים מגובים ב-pCloud\\. העתקה אחרונה: יום .+ \\d\\d/\\d\\d/\\d{4} בשעה \\d\\d:\\d\\d\\.`));
+    assert.equal(await A.locator('[data-act="backup-connect"]').count(), 0);
+    await new Promise((r) => setTimeout(r, 600)); await A.evaluate(() => document.querySelector('[data-backup-panel]').scrollIntoView({ block: 'center' }));
+    await new Promise((r) => setTimeout(r, 3500)); // the toast leaves
+    await A.screenshot({ path: join(outDir, 'cloud-22-backup-up-to-date.png') });
+    await A.unroute('https://my.pcloud.com/**');
+    await A.goto(BASE);
+    await A.getByRole('button', { name: 'נועה', exact: true }).waitFor();
+    await A.evaluate(() => window.__tziyuron.refreshBackup());
+    assert.equal(await A.locator('[data-backup-alert]').count(), 0, 'no reminder once it is connected and up to date');
+  });
+
+  await check('backup to pCloud: a new upload tells the backup at once; waiting and failed files are shown', async () => {
+    mock.backup.hold = true;
+    const sweeps = mock.backup.sweeps.length;
+    await A.evaluate(async () => {
+      const t = window.__tziyuron;
+      const c = document.createElement('canvas'); c.width = 40; c.height = 40;
+      c.getContext('2d').fillRect(5, 5, 20, 20);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg'));
+      const id = crypto.randomUUID();
+      const child = (await t.db.getAll('children'))[0];
+      const mem = { id: crypto.randomUUID(), childId: child.id, type: 'artwork', title: 'גיבוי', caption: '', date: '2026-02-02', image: id };
+      await t.db.put('blobs', { id, type: 'image/jpeg', role: 'image', memoryId: mem.id, blob });
+      await t.db.put('memories', mem);
+      await t.cloud.sync();
+    });
+    await settled(A);
+    assert.ok(mock.backup.sweeps.length > sweeps, 'the upload poked the backup');
+    assert.equal(mock.backup.sweeps.at(-1).retry, false);
+    const total = [...mock.files.keys()].length;
+    await A.goto(BASE + '#/settings');
+    await A.locator('[data-backup-head]', { hasText: 'מעתיק…' }).waitFor();
+    assert.match(await A.locator('[data-backup-text]').textContent(), new RegExp(`${total - 1} מתוך ${total} קבצים מגובים ב-pCloud\\. קובץ אחד ממתין ויועתק בדקות הקרובות\\.`));
+    // One file fails: the state says so, the owner is reminded, and "another try" copies it.
+    mock.backup.failed.add([...mock.files.keys()].at(-1));
+    await A.reload();
+    await A.locator('[data-backup-head]', { hasText: 'חלק מהקבצים לא הועתקו' }).waitFor();
+    assert.match(await A.locator('[data-backup-text]').textContent(), /קובץ אחד לא הועתק\./);
+    await new Promise((r) => setTimeout(r, 600)); await A.evaluate(() => document.querySelector('[data-backup-panel]').scrollIntoView({ block: 'center' }));
+    await A.screenshot({ path: join(outDir, 'cloud-23-backup-failed.png') });
+    mock.backup.hold = false;
+    await A.getByRole('button', { name: 'ניסיון נוסף' }).click();
+    await A.locator('[data-backup-head]', { hasText: 'הגיבוי מעודכן' }).waitFor({ timeout: 15000 });
+    assert.equal(mock.backup.sweeps.at(-1).retry, true);
+  });
+
+  await check('backup to pCloud: a refused connection is shown to everyone, and only the owner can reconnect or disconnect', async () => {
+    mock.backup.problem = true;
+    await A.reload();
+    await A.locator('[data-backup-head]', { hasText: 'pCloud דחה את החיבור' }).waitFor();
+    await A.getByRole('button', { name: 'חיבור מחדש' }).waitFor();
+    await B.goto(BASE + '#/settings');
+    await B.locator('[data-backup-head]', { hasText: 'pCloud דחה את החיבור' }).waitFor();
+    assert.equal(await B.locator('[data-act="backup-connect"], [data-act="backup-disconnect"]').count(), 0);
+    mock.backup.problem = false;
+    await A.reload();
+    await A.locator('[data-backup-head]', { hasText: 'הגיבוי מעודכן' }).waitFor();
+    await A.getByRole('button', { name: 'ניתוק', exact: true }).click();
+    await A.getByRole('dialog').getByRole('button', { name: 'ניתוק' }).click();
+    await A.locator('[data-backup-head]', { hasText: 'עוד לא מחובר' }).waitFor();
+    assert.equal(mock.backup.connected, false);
+    mock.backup.connected = true; // left connected for the rest of the run
+  });
+
   await check('sign-out keeps the local copy and stops sending', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('button', { name: 'יציאה', exact: true }).click();

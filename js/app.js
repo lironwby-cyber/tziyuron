@@ -118,7 +118,16 @@ async function render() {
   let view;
   if (!state.children.length && r.name !== 'settings' && r.name !== 'child') view = renderWelcome();
   else if (r.name === 'memory') view = renderMemory(r.id);
-  else if (r.name === 'settings') view = renderSettings();
+  else if (r.name === 'settings') {
+    if (r.id && r.id.startsWith('backup-')) { // back from pCloud's approval page
+      const ok = r.id === 'backup-ok';
+      history.replaceState(null, '', '#/settings');
+      setTimeout(() => toast(ok ? 'pCloud חובר. ההעתקה מתחילה' : 'החיבור ל-pCloud לא הושלם. אפשר לנסות שוב'), 300);
+      if (ok) cloud.backupSweep().catch(() => {});
+      setTimeout(refreshBackup, 6000);
+    }
+    view = renderSettings();
+  }
   else if (r.name === 'review' && state.review) view = renderReview();
   else if (r.name === 'book' && state.book) view = renderBook();
   else if (r.name === 'child') { openChildForm(r.id === 'new' ? null : childById(r.id)); return; }
@@ -252,6 +261,7 @@ function renderHome() {
   return `${header({ actions: `<button class="icon-btn" data-go="settings" aria-label="הגדרות">${ICONS.settings}</button>`, below: kidsStripHtml() })}
   <main>
     ${searching ? '' : heroHtml(child, list)}
+    ${backupAlertHtml()}
     ${showNag ? `<div class="banner">${art('chest')}
       <div class="grow"><b>כדאי לגבות.</b> <span class="small">הציורים שמורים רק בטלפון הזה.</span></div>
       <button class="btn sunny" data-act="export-all">גיבוי</button>
@@ -478,6 +488,17 @@ function renderBook() {
   </main>`;
 }
 
+/** On the home screen: the owner is told while the family's uploads have no second copy, or when it stopped. */
+function backupAlertHtml() {
+  const b = state._backup;
+  if (!cloud.signedIn() || !b || b === 'error' || !b.owner) return '';
+  if (b.connected && !b.problem && !b.failed) return '';
+  const text = !b.connected ? 'הגיבוי ל-pCloud עוד לא מחובר.' : b.problem ? 'הגיבוי ל-pCloud נעצר: צריך לחבר מחדש.' : 'חלק מהקבצים לא הועתקו ל-pCloud.';
+  return `<div class="banner" data-backup-alert>${art('chest')}
+    <div class="grow"><b>${text}</b> <span class="small">מה שהמשפחה מעלה שמור רק בארכיון המשפחתי.</span></div>
+    <button class="btn sunny" data-go="settings">להגדרות</button></div>`;
+}
+
 // ---------- Settings ----------
 function familyPanelHtml() {
   const u = cloud.user();
@@ -535,6 +556,70 @@ function routesPanelHtml() {
   </div>`;
 }
 
+// The automatic copy of the family archive into the owner's pCloud. The numbers come from the server.
+function backupTime(at) {
+  const d = new Date(at);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${formatDate(todayStr(d))} בשעה ${hm}`;
+}
+
+/** {head, text, tone, connect, copy, disconnect} for the backup panel, from the server's status. */
+function backupView(b) {
+  if (b === undefined) return { head: 'בודק…', text: '', tone: '' };
+  if (b === 'error') return { head: 'אי אפשר לבדוק עכשיו', text: 'אין תשובה מהשרת. הבדיקה תחזור כשתהיה רשת.', tone: 'warn' };
+  if (b === null) return { head: 'עוד לא הופעל', text: 'הגיבוי האוטומטי ל-pCloud עוד לא הופעל בארכיון המשפחתי.', tone: 'warn' };
+  if (!b.connected) {
+    return b.owner
+      ? { head: 'עוד לא מחובר', tone: 'warn', connect: 'חיבור pCloud',
+        text: 'כל מה שהמשפחה מעלה יועתק אוטומטית לתיקייה "ציורון" ב-pCloud שלך, בתיקייה לכל ילד. החיבור נעשה פעם אחת, באישור שלך באתר של pCloud.' }
+      : { head: 'עוד לא מחובר', tone: 'warn', text: 'מי שפתח את הארכיון המשפחתי מחבר את pCloud פעם אחת. עד אז הציורים שמורים במכשירים ובארכיון המשפחתי.' };
+  }
+  if (b.problem) {
+    return { head: 'pCloud דחה את החיבור', tone: 'bad', connect: b.owner ? 'חיבור מחדש' : '',
+      text: `${b.done} מתוך ${b.total} קבצים מגובים. ההעתקה נעצרה עד לחיבור מחדש${b.owner ? '.' : ' על ידי מי שפתח את הארכיון.'}` };
+  }
+  const waiting = Math.max(0, b.total - b.done - b.failed);
+  const parts = [`${b.done} מתוך ${b.total} קבצים מגובים ב-pCloud.`];
+  if (waiting) parts.push(waiting === 1 ? 'קובץ אחד ממתין ויועתק בדקות הקרובות.' : `${waiting} קבצים ממתינים ויועתקו בדקות הקרובות.`);
+  if (b.failed) parts.push(b.failed === 1 ? 'קובץ אחד לא הועתק.' : `${b.failed} קבצים לא הועתקו.`);
+  if (b.last) parts.push(`העתקה אחרונה: ${backupTime(b.last)}.`);
+  const upToDate = !waiting && !b.failed;
+  return {
+    head: !b.total ? 'מחובר' : upToDate ? 'הגיבוי מעודכן' : b.failed ? 'חלק מהקבצים לא הועתקו' : 'מעתיק…',
+    tone: upToDate ? 'good' : b.failed ? 'bad' : '',
+    text: b.total ? parts.join(' ') : 'כל קובץ שיעלה לארכיון המשפחתי יועתק ל-pCloud תוך דקות.',
+    copy: upToDate ? '' : b.failed ? 'ניסיון נוסף' : 'העתקה עכשיו',
+    disconnect: b.owner,
+  };
+}
+
+function backupPanelHtml() {
+  if (!cloud.signedIn()) return '';
+  const v = backupView(state._backup);
+  return `<div class="panel" data-backup-panel>
+    <div class="panel-head">${art('chest')}<div><h2>גיבוי אוטומטי ל-pCloud</h2><p><b class="backup-state ${v.tone || ''}" data-backup-head>${esc(v.head)}</b></p></div></div>
+    <p class="small muted" data-backup-text>${esc(v.text)}</p>
+    ${v.connect || v.copy || v.disconnect ? `<div class="btn-row">
+      ${v.connect ? `<button class="btn sunny" data-act="backup-connect">${esc(v.connect)}</button>` : ''}
+      ${v.copy ? `<button class="btn" data-act="backup-copy">${esc(v.copy)}</button>` : ''}
+      ${v.disconnect ? '<button class="btn" data-act="backup-disconnect">ניתוק</button>' : ''}
+    </div>` : ''}
+  </div>`;
+}
+
+/** Reads the backup's state from the server and redraws the panel when it changed. */
+async function refreshBackup() {
+  if (!cloud.signedIn()) { state._backup = undefined; return; }
+  let next;
+  try { next = await cloud.backupStatus(); } catch { next = state._backup && state._backup !== 'error' ? state._backup : 'error'; }
+  const changed = JSON.stringify(next) !== JSON.stringify(state._backup);
+  state._backup = next;
+  if (!changed) return;
+  const panel = $('[data-backup-panel]');
+  if (panel && route().name === 'settings') panel.outerHTML = backupPanelHtml();
+  else if (route().name === 'home' && !document.querySelector('.scrim')) render();
+}
+
 function renderSettings() {
   const last = state.settings.lastBackupAt ? formatDate(todayStr(new Date(state.settings.lastBackupAt))) : 'עוד לא';
   return `${header({ title: 'הגדרות', backTo: '' })}
@@ -551,8 +636,9 @@ function renderSettings() {
     </div>
     ${familyPanelHtml()}
     ${routesPanelHtml()}
+    ${backupPanelHtml()}
     <div class="panel">
-      <div class="panel-head">${art('chest')}<div><h2>גיבוי</h2><p>גיבוי אחרון: <b data-last-backup>${esc(last)}</b></p></div></div>
+      <div class="panel-head">${art('chest')}<div><h2>גיבוי לקובץ</h2><p>גיבוי אחרון: <b data-last-backup>${esc(last)}</b></p></div></div>
       <p class="small muted">${cloud.signedIn() ? 'הציורים נשמרים במכשיר וגם בארכיון המשפחתי.' : 'הציורים נשמרים רק במכשיר הזה.'} קובץ הגיבוי הוא ZIP רגיל עם תיקייה לכל ילד, כך שאפשר לפתוח אותו גם בלי האפליקציה. בטלפון נפתח תפריט השיתוף, ומשם שומרים ישר ל-Google Drive או ל-iCloud.</p>
       <div class="btn-row">
         <button class="btn sunny" data-act="export-all" ${state.memories.length || state.children.length ? '' : 'disabled'}>גיבוי עכשיו</button>
@@ -576,7 +662,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.6</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.7</p>
   </main>`;
 }
 
@@ -593,7 +679,7 @@ async function fillStorage() {
 
 // ---------- Events ----------
 function bindCommon() {
-  if (route().name === 'settings') fillStorage();
+  if (route().name === 'settings') { fillStorage(); refreshBackup(); }
 }
 
 APP.addEventListener('click', async (e) => {
@@ -758,6 +844,30 @@ async function handleAction(act, r) {
     case 'cloud-signin': return openSignIn();
     case 'join-retry': return render();
     case 'install-guide': return openInstallGuide();
+    case 'backup-connect': {
+      const btn = $('[data-act="backup-connect"]');
+      if (btn) btn.disabled = true;
+      let res;
+      try { res = await cloud.backupConnect(); } catch { res = { reason: 'network' }; }
+      if (res.url) { location.href = res.url; return; }
+      if (btn) btn.disabled = false;
+      return toast(/not configured/.test(res.reason) ? 'בשרת חסרים מפתחות האפליקציה של pCloud'
+        : /only the owner/.test(res.reason) ? 'רק מי שפתח את הארכיון מחבר את הגיבוי' : 'החיבור לא התחיל. אפשר לנסות שוב');
+    }
+    case 'backup-copy': {
+      const btn = $('[data-act="backup-copy"]');
+      if (btn) btn.disabled = true;
+      try { await cloud.backupSweep({ retry: true }); toast('ההעתקה התחילה'); } catch { toast('ההעתקה לא התחילה. אפשר לנסות שוב'); }
+      setTimeout(refreshBackup, 5000);
+      setTimeout(refreshBackup, 20000);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    case 'backup-disconnect': {
+      if (!(await confirmDialog('לנתק את הגיבוי ל-pCloud?', 'מה שכבר הועתק נשאר ב-pCloud. קבצים חדשים לא יועתקו עד לחיבור מחדש.', { ok: 'ניתוק' }))) return;
+      try { await cloud.backupDisconnect(); } catch { toast('הניתוק לא הצליח'); }
+      return refreshBackup();
+    }
     case 'cloud-sync': {
       await cloud.sync();
       const st = cloud.getStatus();
@@ -2197,7 +2307,17 @@ function startCloud() {
     const busy = document.querySelector('.scrim') || state.review || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
     if (!busy) render().then(watchJobs);
   });
-  const wake = () => { if (document.visibilityState === 'visible' && cloud.signedIn()) { loadPrefs(); cloud.sync().then(checkJobs); } };
+  let backupSeen = 0;
+  const wake = () => {
+    if (document.visibilityState !== 'visible' || !cloud.signedIn()) return;
+    loadPrefs();
+    cloud.sync().then(checkJobs).then(() => {
+      // The backup's state: on opening, and then every 5 minutes (the settings screen asks by itself).
+      if (Date.now() - backupSeen < 5 * 60000) return;
+      backupSeen = Date.now();
+      refreshBackup();
+    });
+  };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);
   setInterval(wake, 60000);
@@ -2223,4 +2343,4 @@ async function boot() {
 boot();
 
 // Exposed for tests.
-window.__tziyuron = { state, render, db, cloud };
+window.__tziyuron = { state, render, db, cloud, refreshBackup };

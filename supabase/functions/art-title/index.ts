@@ -110,12 +110,19 @@ Deno.serve(async (req) => {
     const routine = Deno.env.get('ART_TITLE_ROUTINE_ID');
     const token = Deno.env.get('ART_TITLE_ROUTINE_TOKEN');
     if (!routine || !token) return json({ title: null, reason: `not configured: free route misses ${!routine ? 'the task id' : 'the task token'}` });
+    // A token pasted where the task's id belongs would travel in the address and come back in the refusal: stop here.
+    if (!/^trig_[A-Za-z0-9]+$/.test(routine)) return json({ title: null, reason: 'not configured: the task id is not a task id (it starts with trig_)' });
     const res = await fetch(`https://api.anthropic.com/v1/claude_code/routines/${routine}/fire`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01', 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: `memory_id: ${memory.id}\nwant: ${onlyMotions ? 'motions' : 'title'}\nimage_jpeg_base64: ${picture}` }),
     });
-    if (!res.ok) return json({ title: null, reason: res.status === 429 ? 'busy' : `task ${res.status}` });
+    if (!res.ok) {
+      // The service's own words on why it refused (never the picture or a key), so that a refusal can be traced.
+      const why = (await res.text().catch(() => '')).replace(/sk-[A-Za-z0-9_-]+/g, 'sk-…').replace(/[A-Za-z0-9+/=]{60,}/g, '…').slice(0, 300);
+      console.log(`art-title: task refused (${res.status}, ${picture.length} characters): ${why}`);
+      return json({ title: null, reason: res.status === 429 ? 'busy' : `task ${res.status}` });
+    }
     return json({ queued: true, eta_seconds: FREE_ETA_SECONDS });
   }
 

@@ -283,6 +283,9 @@ textarea.input { min-height: 96px; resize: vertical; }
 .banner .sprite { width: 54px; height: 54px; flex: none; }
 .banner .grow { flex: 1; min-width: 0; }
 .banner b { font-weight: 900; }
+.backup-state.good { color: var(--ok); }
+.backup-state.bad { color: var(--red-deep); }
+.backup-state.warn { color: #9a6400; }
 
 /* ---------- sheets & dialogs ---------- */
 .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 50; display: flex; align-items: flex-end; justify-content: center; animation: fade .15s; }

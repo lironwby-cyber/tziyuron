@@ -15,6 +15,13 @@ export function startMock(port) {
   const motionSets = []; // movements the naming step answers next
   const wants = [];
   const flags = { hint: false }; // does art_animation_jobs have the hint column yet
+  // The backup to pCloud: off (as before migration 005) until a test turns it on. `hold` keeps files waiting.
+  const backup = { enabled: false, connected: false, problem: false, hold: false, done: new Set(), failed: new Set(), sweeps: [], connects: 0, last: null };
+  const backupOwner = () => (t.art_child_members[0] || {}).user_id;
+  const backupRun = () => {
+    if (!backup.connected || backup.problem || backup.hold) return;
+    for (const p of files.keys()) if (!backup.failed.has(p) && !backup.done.has(p)) { backup.done.add(p); backup.last = now(); }
+  };
 
   const isMember = (uid, childId) => t.art_child_members.some((m) => m.child_id === childId && m.user_id === uid);
   const childOf = { art_children: (r) => r.id, art_child_members: (r) => r.child_id, art_memories: (r) => r.child_id, art_invites: (r) => r.child_id, art_animation_jobs: (r) => r.child_id };
@@ -90,6 +97,30 @@ export function startMock(port) {
         const me = [...users.values()].find((u) => u.id === uid);
         if (req.method === 'PUT') me.meta = { ...(me.meta || {}), ...(json().data || {}) };
         return send(res, 200, { id: uid, user_metadata: me.meta || {} });
+      }
+
+      if (path === '/rest/v1/rpc/art_backup_status') {
+        if (!backup.enabled) return send(res, 404, { code: 'PGRST202', message: 'Could not find the function' });
+        const mine = [...files.keys()].filter((p) => isMember(uid, p.split('/')[0]));
+        return send(res, 200, {
+          connected: backup.connected, owner: backupOwner() === uid, problem: backup.problem, total: mine.length,
+          done: mine.filter((p) => backup.done.has(p)).length, failed: mine.filter((p) => backup.failed.has(p)).length,
+          last: mine.some((p) => backup.done.has(p)) ? backup.last : null,
+        });
+      }
+      if (path === '/functions/v1/art-backup') {
+        const b = json();
+        if (b.action === 'sweep') {
+          backup.sweeps.push({ uid, retry: b.retry === true });
+          if (!backup.connected) return send(res, 200, { ok: false, reason: 'not connected' });
+          if (b.retry) backup.failed.clear();
+          backupRun();
+          return send(res, 200, { ok: true, started: true });
+        }
+        if (backupOwner() !== uid) return send(res, 403, { ok: false, reason: 'only the owner connects the backup' });
+        if (b.action === 'connect') { backup.connects += 1; return send(res, 200, { ok: true, url: 'https://my.pcloud.com/oauth2/authorize?client_id=test&response_type=code&state=abc' }); }
+        if (b.action === 'disconnect') { backup.connected = false; return send(res, 200, { ok: true }); }
+        return send(res, 400, { ok: false });
       }
 
       if (path === '/rest/v1/rpc/art_accept_invite') {
@@ -211,5 +242,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, users })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, backup, backupRun, users })));
 }
