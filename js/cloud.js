@@ -119,8 +119,8 @@ export async function signIn(email, password) {
 }
 
 /** Returns {user} when the account is ready, or {confirm: true} when the email must be confirmed first. */
-export async function signUp(email, password) {
-  const data = await authCall('signup', { email, password });
+export async function signUp(email, password, backTo = '') {
+  const data = await authCall(backTo ? `signup?redirect_to=${encodeURIComponent(backTo)}` : 'signup', { email, password });
   if (data && data.access_token) {
     saveSession(sessionFrom(data));
     await seedOutbox();
@@ -145,6 +145,15 @@ export function readAuthHash(hash) {
   if (q.get('error') || q.get('error_code')) return { error: q.get('error_code') || q.get('error') };
   if (!q.get('access_token')) return null;
   return { type: q.get('type') || '', access_token: q.get('access_token'), refresh_token: q.get('refresh_token') || '', expires_in: Number(q.get('expires_in')) || 3600 };
+}
+
+/** Signs in with the token of a confirmation link (a new account whose email was just confirmed). */
+export async function adoptLink(link) {
+  const res = await fetch(config.url + '/auth/v1/user', { headers: { apikey: config.key, Authorization: `Bearer ${link.access_token}` } });
+  const me = await parse(res);
+  saveSession(sessionFrom({ access_token: link.access_token, refresh_token: link.refresh_token, expires_in: link.expires_in, user: me }));
+  await seedOutbox();
+  return session.user;
 }
 
 /** Sets a new password with the token of a recovery link, and only then signs in on this device. */

@@ -898,6 +898,79 @@ try {
     await F.context().close();
   });
 
+  await check('an invitation survives a forgotten password: the guest resets the password from the invitation and still joins', async () => {
+    // What happened to a real guest: the link was opened, the password was reset through the email, and the family did not appear.
+    await api('/__test/user', { email: 'ran@example.com', password: 'old-secret' });
+    const code = (await A.evaluate(() => window.__tziyuron.cloud.createFamilyInvite('רן'))).code;
+    const G = await device('G');
+    await G.goto(`${BASE}#/join/${code}`);
+    await G.getByLabel('אימייל').fill('ran@example.com');
+    await G.getByRole('button', { name: 'שכחתי סיסמה' }).click();
+    await G.getByRole('heading', { name: 'שלחנו קישור לאיפוס' }).waitFor();
+    await G.getByRole('button', { name: 'הבנתי' }).click();
+    await G.getByText('כדי להצטרף צריך להיכנס.').waitFor();
+    // The email's link comes back to the plain site address: the invitation's code is not in it.
+    const ran = mock.users.get('ran@example.com');
+    await G.goto('about:blank');
+    await G.goto(`${BASE}#access_token=tok-${ran.id}&expires_in=3600&refresh_token=ref-${ran.id}&token_type=bearer&type=recovery`);
+    const sheet = G.getByRole('dialog', { name: 'סיסמה חדשה' });
+    await sheet.getByLabel('סיסמה חדשה').fill('new-secret-9');
+    await sheet.getByLabel('שוב, לאישור').fill('new-secret-9');
+    await sheet.getByRole('button', { name: 'שמירה וכניסה' }).click();
+    // Signed in, and the invitation that led here is taken up without the link being opened again.
+    await G.getByLabel('שם', { exact: true }).fill('רן');
+    await G.getByRole('button', { name: 'הצטרפות' }).click();
+    await G.getByRole('heading', { name: 'ציורון כאפליקציה בטלפון' }).waitFor({ timeout: 15000 });
+    await G.getByRole('button', { name: 'הבנתי' }).click();
+    await who(G, 'הורה');
+    await G.getByRole('button', { name: 'נועה', exact: true }).waitFor({ timeout: 15000 });
+    await G.getByRole('button', { name: 'יובל', exact: true }).waitFor();
+    assert.equal(mock.tables.art_child_members.filter((m) => m.user_id === ran.id).length, 2);
+    assert.equal(await G.evaluate(() => localStorage.getItem('tziyuron-pending-invite')), null, 'nothing is left waiting');
+    // Opening the app again does not ask to join again.
+    await G.reload();
+    await G.getByRole('button', { name: 'נועה', exact: true }).waitFor();
+    assert.equal(await G.getByRole('dialog').count(), 0);
+    await G.context().close();
+  });
+
+  await check('an invitation survives a later sign-in: opened, left, and taken up after signing in from the settings', async () => {
+    await api('/__test/user', { email: 'nurit@example.com', password: 'secret-nurit' });
+    const code = (await A.evaluate(() => window.__tziyuron.cloud.createFamilyInvite('נורית'))).code;
+    const H = await device('H');
+    await H.goto(`${BASE}#/join/${code}`);
+    await H.getByLabel('אימייל').waitFor();
+    // The guest leaves without signing in, and comes back another time through the plain address.
+    await H.goto('about:blank');
+    await H.goto(BASE + '#/settings');
+    await H.getByRole('button', { name: 'כניסה או חשבון חדש' }).click();
+    await signIn(H, 'nurit@example.com', 'secret-nurit');
+    await H.getByLabel('שם', { exact: true }).fill('נורית');
+    await H.getByRole('button', { name: 'הצטרפות' }).click();
+    await H.getByRole('heading', { name: 'ציורון כאפליקציה בטלפון' }).waitFor({ timeout: 15000 });
+    await H.getByRole('button', { name: 'הבנתי' }).click();
+    await who(H, 'הורה');
+    await H.getByRole('button', { name: 'יובל', exact: true }).waitFor({ timeout: 15000 });
+    const nurit = mock.users.get('nurit@example.com').id;
+    assert.equal(mock.tables.art_child_members.filter((m) => m.user_id === nurit).length, 2);
+    assert.equal(await H.evaluate(() => localStorage.getItem('tziyuron-pending-invite')), null);
+    await H.context().close();
+
+    // A used or cancelled invitation that is still remembered on a device is dropped after one refusal, not asked forever.
+    const I = await device('I');
+    await I.goto(BASE);
+    await I.evaluate((c) => localStorage.setItem('tziyuron-pending-invite', JSON.stringify({ code: c, at: Date.now() })), code);
+    await I.goto('about:blank');
+    await I.goto(BASE + '#/settings');
+    await I.getByRole('button', { name: 'כניסה או חשבון חדש' }).click();
+    await signIn(I, 'savta@example.com', 'new-secret-1');
+    await I.getByLabel('שם', { exact: true }).fill('סבתא');
+    await I.getByRole('button', { name: 'הצטרפות' }).click();
+    await I.getByText('ההזמנה לא תקפה או שכבר נעשה בה שימוש').waitFor();
+    assert.equal(await I.evaluate(() => localStorage.getItem('tziyuron-pending-invite')), null);
+    await I.context().close();
+  });
+
   await check('sign-out keeps the local copy and stops sending', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('button', { name: 'יציאה', exact: true }).click();

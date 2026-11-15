@@ -2293,7 +2293,7 @@ function openSignIn() {
       err.textContent = '';
       try {
         if (mode === 'up') {
-          const r = await cloud.signUp(email, password);
+          const r = await cloud.signUp(email, password, location.origin + location.pathname);
           if (r.confirm) { close('confirm'); return; }
         } else await cloud.signIn(email, password);
         close('in');
@@ -2311,8 +2311,34 @@ function openSignIn() {
     toast('נכנסת. מסנכרן…');
     render();
     await cloud.sync();
+    resumeInvite();
     return true;
   });
+}
+
+// An invitation's code lives only in the link. Signing in can leave that address (a forgotten password or a new
+// account goes through an email and comes back to the plain site), so the code of an opened invitation is kept on
+// this device until it is taken up, refused by the server, or a week old.
+const INVITE_KEY = 'tziyuron-pending-invite';
+function pendingInvite() {
+  try {
+    const v = JSON.parse(localStorage.getItem(INVITE_KEY) || 'null');
+    if (v && /^[0-9A-Za-z]{8,80}$/.test(v.code) && Date.now() - v.at < 7 * 864e5) return v.code;
+  } catch { /* storage blocked: the link still works while its address is open */ }
+  return null;
+}
+function keepInvite(code) {
+  try { localStorage.setItem(INVITE_KEY, JSON.stringify({ code, at: Date.now() })); } catch { /* storage blocked */ }
+}
+function dropInvite() {
+  try { localStorage.removeItem(INVITE_KEY); } catch { /* storage blocked */ }
+}
+/** Signed in, and an invitation was opened here before: go and take it up. */
+function resumeInvite() {
+  const code = pendingInvite();
+  if (!code || !cloud.signedIn() || state._joining || kidMode()) return false;
+  go(`join/${code}`, { replace: true });
+  return true;
 }
 
 /** The address an email link opened: a recovery link asks for a new password; a dead link says so. The token never stays in the address. */
@@ -2322,7 +2348,18 @@ async function handleAuthLink() {
   history.replaceState(null, '', '#/');
   await render();
   if (link.error) { toast('הקישור לא תקף או שפג תוקפו. אפשר לבקש קישור חדש במסך הכניסה.', 7000); return; }
-  if (link.type !== 'recovery') return;
+  if (link.type !== 'recovery') {
+    // A new account's email was confirmed: the link signs in, and an invitation that was waiting is taken up.
+    try { await cloud.adoptLink(link); } catch { toast('הקישור לא תקף או שפג תוקפו. אפשר להיכנס במסך הכניסה.', 7000); return; }
+    toast('האימייל אושר, ונכנסת.');
+    await render();
+    if (resumeInvite()) return;
+    await cloud.sync();
+    await load();
+    await render();
+    loadPrefs().then(askModeOnce);
+    return;
+  }
   const done = await openSheet((body, close) => {
     body.innerHTML = `
       <h2>סיסמה חדשה</h2>
@@ -2358,6 +2395,7 @@ async function handleAuthLink() {
   if (!done) return;
   toast(isInstalled() ? 'הסיסמה הוחלפה, ונכנסת.' : 'הסיסמה הוחלפה, ונכנסת. אם ציורון מותקן במסך הבית, נכנסים שם עם הסיסמה החדשה.', 7000);
   await render();
+  if (resumeInvite()) return; // the invitation that led here is taken up now
   await cloud.sync();
   await load();
   await render();
@@ -2418,6 +2456,7 @@ async function openFamilySheet(child) {
 async function joinFamily(code) {
   if (!code) { go('', { replace: true }); return; }
   if (state._joining) return; // renders triggered by the sign-in and the first sync land here again
+  keepInvite(code);
   state._joining = true;
   try { await joinFlow(code); } finally { state._joining = false; }
 }
@@ -2441,18 +2480,25 @@ async function joinFlow(code) {
       if (v) close(v);
     });
   }, { label: 'הצטרפות למשפחה' });
-  if (!name) { go('', { replace: true }); return; }
+  if (!name) { dropInvite(); go('', { replace: true }); return; } // closed on purpose: the link itself still works
   let joined = false;
   try {
     const ids = await cloud.acceptInvite(code, name);
+    dropInvite();
     await cloud.sync();
     await load();
     const first = ids.find((id) => childById(id));
     if (first) { state.settings.activeChild = first; saveSettings(); }
     toast('הצטרפת. הציורים כבר כאן.');
     joined = true;
-  } catch {
-    toast('ההזמנה לא תקפה או שכבר נעשה בה שימוש. אפשר לבקש קישור חדש.', 6000);
+  } catch (err) {
+    if (err instanceof TypeError || (err && err.status >= 500)) {
+      // No network, or the server stumbled: the invitation is kept and tried again on the next opening.
+      toast('אין חיבור כרגע. ההזמנה נשמרה, והיא תמומש בפתיחה הבאה של ציורון.', 7000);
+    } else {
+      dropInvite();
+      toast('ההזמנה לא תקפה או שכבר נעשה בה שימוש. אפשר לבקש קישור חדש.', 6000);
+    }
   }
   state._joining = false;
   go('', { replace: true });
@@ -2863,7 +2909,8 @@ async function boot() {
   }
   if (route().name === 'review' || route().name === 'book') history.replaceState(null, '', '#/');
   // An email link (a forgotten password) is taken out of the address before anything is drawn.
-  if (cloud.readAuthHash(location.hash)) handleAuthLink(); else await render();
+  if (cloud.readAuthHash(location.hash)) handleAuthLink();
+  else if (route().name !== 'join' && resumeInvite()) { /* an invitation opened earlier on this device is taken up */ } else await render();
   startCloud();
   if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.__noSW) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
