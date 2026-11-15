@@ -471,12 +471,16 @@ export function acceptInvite(code, myName) {
 
 // ---------- Animation jobs ----------
 /** Ask for an animation of a drawing that is already in the family archive. Returns the job row. */
-export async function requestAnimation(memory) {
-  const rows = await rest('art_animation_jobs', {
-    method: 'POST', headers: REP,
-    body: { memory_id: memory.id, child_id: memory.childId, source_path: `${memory.childId}/${memory.image}` },
-  });
-  return rows[0];
+export async function requestAnimation(memory, hint = '') {
+  const body = { memory_id: memory.id, child_id: memory.childId, source_path: `${memory.childId}/${memory.image}` };
+  if (hint) {
+    // The chosen movement travels with the request. A server that does not have the column yet (PGRST204)
+    // still gets the request, without it.
+    try { return (await rest('art_animation_jobs', { method: 'POST', headers: REP, body: { ...body, hint } }))[0]; } catch (err) {
+      if (!/PGRST204|hint/.test(String((err && (err.code || err.message)) || ''))) throw err;
+    }
+  }
+  return (await rest('art_animation_jobs', { method: 'POST', headers: REP, body }))[0];
 }
 
 export function jobs(ids) {
@@ -501,10 +505,13 @@ export async function setPrefs(prefs) {
  * Paid route: resolves to {title} (null when the picture is not clear).
  * Free route (picture = small JPEG as base64): resolves to {queued: true, eta} and the title arrives by sync.
  */
-export async function suggestTitle(memoryId, { route = 'paid', picture = null } = {}) {
-  const body = { memory_id: memoryId, ...(route === 'free' ? { route, picture } : {}) };
+export async function suggestTitle(memoryId, { route = 'paid', picture = null, want = 'title' } = {}) {
+  const body = { memory_id: memoryId, ...(want === 'motions' ? { want } : {}), ...(route === 'free' ? { route, picture } : {}) };
   const data = (await call('/functions/v1/art-title', { method: 'POST', body })) || {};
   if (data.queued) return { queued: true, eta: Number(data.eta_seconds) || 60 };
   const turn = [90, 180, 270].includes(data.turn) ? data.turn : 0;
-  return { title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null, turn, reason: data.reason || '' };
+  return {
+    title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null, turn,
+    motions: Array.isArray(data.motions) ? data.motions : [], reason: data.reason || '',
+  };
 }

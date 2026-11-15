@@ -144,10 +144,36 @@ try {
   });
 
   await check('animate the drawing on the device and keep the clip', async () => {
+    // The name says what is drawn, so the movements offered fit it.
     await page.getByRole('button', { name: 'הנפשה' }).click();
-    await page.getByRole('button', { name: 'מרחף' }).click();
+    await page.getByRole('heading', { name: 'איך להנפיש את טיל לירח?' }).waitFor();
+    await page.getByText('הצעות לפי השם של הציור.').waitFor();
+    assert.deepEqual(await page.locator('.motion-opt b').allTextContents(), ['הטיל ממריא', 'הירח זוהר', 'תנועה עדינה של כל הציור']);
     await page.waitForTimeout(500);
-    await shot('05c-animate');
+    await shot('05c-motions');
+    await page.getByRole('button', { name: 'הטיל ממריא' }).click();
+    const canvas = page.locator('.anim-stage canvas');
+    await page.waitForFunction(() => document.querySelector('.anim-stage canvas')?.dataset.cut === 'true', null, { timeout: 10000 });
+    assert.equal(await page.getByRole('button', { name: 'הטיל ממריא' }).getAttribute('aria-pressed'), 'true');
+    // The page stays in place and the figure moves on it: the corners keep still, the middle changes.
+    const probe = () => canvas.evaluate((c) => {
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let ink = 0, sum = 0;
+      for (let i = 0; i < d.length; i += 4 * 7) { if (d[i] + d[i + 1] + d[i + 2] < 600) { ink++; sum = (sum + i * 31) % 1000003; } }
+      return { ink, sum, corner: [d[0], d[1], d[2]].join() };
+    });
+    const f1 = await probe();
+    await page.waitForTimeout(700);
+    const f2 = await probe();
+    assert.ok(f1.ink > 200, `the drawing is on the stage (${f1.ink})`);
+    assert.notEqual(f1.sum, f2.sum, 'the figure moved');
+    assert.equal(f1.corner, f2.corner, 'the page did not move');
+    await shot('05d-animate-fit');
+    await page.getByRole('button', { name: 'מרחף' }).click();
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'הירח זוהר' }).click();
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'הטיל ממריא' }).click();
     await page.getByRole('button', { name: /שמירה כסרטון/ }).click();
     await page.getByText('ההנפשה נשמרה ליד הציור').waitFor({ timeout: 20000 });
     const v = await page.evaluate(async () => {
@@ -212,6 +238,33 @@ try {
     await page.getByRole('button', { name: 'חזרה' }).click();
     await page.getByRole('button', { name: 'יציאה' }).click();
     await page.getByRole('button', { name: 'הוספה' }).waitFor();
+  });
+
+  await check('a drawing without a name: the animation button asks for a name first, then offers what fits it', async () => {
+    await page.locator('[data-mem]').first().click();
+    await page.getByRole('button', { name: 'הנפשה' }).click();
+    await page.getByRole('heading', { name: 'לציור עוד אין שם' }).waitFor();
+    await page.locator('[data-name-first]', { hasText: 'אפשר לכתוב שם עכשיו.' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'שם אוטומטי' }).count(), 0, 'no automatic name without the family archive');
+    await shot('06e-no-name');
+    await page.getByRole('button', { name: 'כתיבת שם עכשיו' }).click();
+    await page.getByLabel('כותרת').fill('פרפר ופרחים');
+    await page.getByRole('button', { name: 'שמירה' }).click();
+    await page.getByRole('heading', { name: 'איך להנפיש את פרפר ופרחים?' }).waitFor();
+    assert.deepEqual(await page.locator('.motion-opt b').allTextContents(), ['הפרפר עף', 'הפרחים מתנדנדים ברוח', 'תנועה עדינה של כל הציור']);
+    await page.keyboard.press('Escape');
+    // Without a name the animation is still possible.
+    await page.getByRole('button', { name: 'עריכה' }).click();
+    await page.getByLabel('כותרת').fill('');
+    await page.getByRole('button', { name: 'שמירה' }).click();
+    await page.getByRole('button', { name: 'הנפשה' }).click();
+    await page.getByRole('button', { name: 'הנפשה בלי שם' }).click();
+    await page.getByText('בלי שם אין לי הצעה שמתאימה לציור.').waitFor();
+    await page.getByRole('button', { name: 'תנועה עדינה של כל הציור' }).click();
+    await page.getByRole('button', { name: 'קווים חיים' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'קווים חיים' }).getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: 'ביטול' }).click();
+    await page.goBack();
   });
 
   await check('manual crop editor opens and re-processes', async () => {

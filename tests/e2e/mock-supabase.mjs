@@ -12,6 +12,9 @@ export function startMock(port) {
   const titleCalls = [];
   const freePictures = [];
   const turns = [];
+  const motionSets = []; // movements the naming step answers next
+  const wants = [];
+  const flags = { hint: false }; // does art_animation_jobs have the hint column yet
 
   const isMember = (uid, childId) => t.art_child_members.some((m) => m.child_id === childId && m.user_id === uid);
   const childOf = { art_children: (r) => r.id, art_child_members: (r) => r.child_id, art_memories: (r) => r.child_id, art_invites: (r) => r.child_id, art_animation_jobs: (r) => r.child_id };
@@ -125,6 +128,7 @@ export function startMock(port) {
           } else {
             if (name === 'art_child_members' || !visible(row)) return send(res, 403, { code: '42501', message: 'row-level security' });
             if (name === 'art_invites') row.code = randomUUID().replace(/-/g, '');
+            if (name === 'art_animation_jobs' && 'hint' in row && !flags.hint) return send(res, 400, { code: 'PGRST204', message: "Could not find the 'hint' column of 'art_animation_jobs' in the schema cache" });
             if (name === 'art_animation_jobs') { row.id = randomUUID(); row.status = 'queued'; row.requested_by = uid; }
             if (row.id && rows.some((r) => r.id === row.id)) return send(res, 409, { code: '23505', message: 'duplicate key' });
             rows.push(row);
@@ -153,18 +157,27 @@ export function startMock(port) {
         const m = t.art_memories.find((r) => r.id === json().memory_id && isMember(uid, r.child_id));
         if (!m) return send(res, 404, { error: 'not found' });
         const image = m.details && m.details.image;
-        if (m.title || !files.has(`${m.child_id}/${image}`)) return send(res, 200, { title: null });
         const b = json();
+        if ((m.title && b.want !== 'motions') || !files.has(`${m.child_id}/${image}`)) return send(res, 200, { title: null });
         titleCalls.push(m.id);
+        wants.push(b.want || 'title');
+        if (b.want === 'motions') {
+          const motions = motionSets.length ? motionSets.shift() : [];
+          if (b.route !== 'free') return send(res, 200, { title: null, motions });
+          freePictures.push(b.picture);
+          setTimeout(() => { Object.assign(m, { details: { ...m.details, motions }, updated_at: now() + '-task' }); }, 1500);
+          return send(res, 200, { queued: true, eta_seconds: 60 });
+        }
         if (b.route === 'free') {
           // The scheduled task: a moment later the title is written on the server.
           freePictures.push(b.picture);
           const title = titles.length ? titles.shift() : null;
           const turn = turns.length ? turns.shift() : 0;
-          setTimeout(() => { if (title && !m.title) Object.assign(m, { title, details: { ...m.details, autoTitle: true, ...(turn ? { turn } : {}) }, updated_at: now() + '-task' }); }, 1500);
+          const motions = motionSets.length ? motionSets.shift() : null;
+          setTimeout(() => { if (title && !m.title) Object.assign(m, { title, details: { ...m.details, autoTitle: true, ...(turn ? { turn } : {}), ...(motions ? { motions } : {}) }, updated_at: now() + '-task' }); }, 1500);
           return send(res, 200, { queued: true, eta_seconds: 60 });
         }
-        return send(res, 200, { title: titles.length ? titles.shift() : null, turn: turns.length ? turns.shift() : 0 });
+        return send(res, 200, { title: titles.length ? titles.shift() : null, turn: turns.length ? turns.shift() : 0, motions: motionSets.length ? motionSets.shift() : [] });
       }
 
       const BUCKET = '/storage/v1/object/';
@@ -198,5 +211,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, users })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, users })));
 }

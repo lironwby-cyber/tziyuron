@@ -33,4 +33,6 @@ npm run test:e2e    # בדיקות דפדפן מקצה לקצה (Playwright, pyt
 - `js/scan.js` צנרת העיבוד בדפדפן
 - `js/camera.js` מצלמה עם זיהוי חי · `js/crop.js` עורך חיתוך · `js/recorder.js` הקלטה
 - `js/zip.js` כתיבה וקריאה של ZIP · `js/db.js` אחסון · `js/model.js` חיפוש, קיבוץ, נתיבי גיבוי
+- `js/anim.js` הנפשה במכשיר · `js/motion.js` תנועות שמתאימות לציור (הצעות לפי השם, מיקום הדמות בכל רגע)
+- `docs/task-prompt-title.txt` הנוסח של משימת השמות המתוזמנת (שם, כיוון והצעות תנועה)
 - `js/app.js` המסכים

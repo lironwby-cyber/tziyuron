@@ -38,6 +38,12 @@ async function start(jobId: string) {
   const signed = await db.storage.from(BUCKET).createSignedUrl(job.source_path, 2 * 60 * 60);
   if (signed.error || !signed.data) return fail(jobId, 'the drawing was not found', { status: 'failed' });
 
+  // The movement the member chose ("fly: הפרפר עף"), when the request carries one. Read separately, so that a
+  // database without the column yet behaves as before. Only the fixed shape is passed on.
+  const extra = await db.from('art_animation_jobs').select('hint').eq('id', jobId).maybeSingle();
+  const hint = extra.error ? '' : String((extra.data as { hint?: string } | null)?.hint ?? '');
+  const motion = /^[a-z]{3,8}: [א-ת ]{2,30}$/.test(hint) ? hint : '';
+
   const routine = Deno.env.get('ART_ROUTINE_ID');
   const token = Deno.env.get('ART_ROUTINE_TOKEN');
   if (!routine || !token) return fail(jobId, 'the scheduled task is not connected yet', { fired_at: null });
@@ -49,7 +55,7 @@ async function start(jobId: string) {
       'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ text: `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}` }),
+    body: JSON.stringify({ text: `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}${motion ? `\nmotion: ${motion}` : ''}` }),
   });
   if (!res.ok) return fail(jobId, `the scheduled task did not start (${res.status})`, { fired_at: null });
   return json({ ok: true });

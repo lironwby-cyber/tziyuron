@@ -166,11 +166,16 @@ try {
     await A.goto(BASE);
     await A.getByText('טיל לירח של נועה').first().click();
     await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByRole('button', { name: 'הטיל ממריא' }).click();
+    await A.getByRole('heading', { name: 'הטיל ממריא' }).waitFor();
+    await A.waitForTimeout(500);
+    await A.screenshot({ path: join(outDir, 'cloud-04a-where.png') });
     await A.getByRole('button', { name: /הנפשה חכמה/ }).click();
     await A.getByText('ההנפשה בהכנה', { exact: true }).waitFor();
     await A.screenshot({ path: join(outDir, 'cloud-04-preparing.png') });
     assert.equal(mock.tables.art_animation_jobs.length, 1);
     const job = mock.tables.art_animation_jobs[0];
+    assert.equal('hint' in job, false, 'a server without the new column still gets the request');
     jobId = job.id;
     assert.equal(job.status, 'queued');
     assert.ok(mock.files.has(job.source_path), 'the job points at the uploaded drawing');
@@ -203,6 +208,7 @@ try {
 
   await check('a failed job shows a calm message and can be dismissed', async () => {
     await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByRole('button', { name: 'תנועה עדינה של כל הציור' }).click();
     await A.getByRole('button', { name: /הנפשה חכמה/ }).click();
     await A.getByText('ההנפשה בהכנה', { exact: true }).waitFor();
     const job = mock.tables.art_animation_jobs.find((j) => j.id !== jobId);
@@ -347,6 +353,71 @@ try {
     assert.equal(row.details.rotUser, undefined);
   });
 
+  await check('the naming step also says what can move: the suggestions are offered, and the choice goes with a paid request', async () => {
+    mock.titles.push('פרפר בגינה');
+    mock.motionSets.push([
+      { label: 'הפרפר עף', motion: 'fly', box: [0.25, 0.2, 0.45, 0.4], dir: 'none' },
+      { label: 'הפרחים זזים ברוח', motion: 'sway', box: [0.1, 0.6, 0.8, 0.35], dir: 'none' },
+      { label: 'drop table', motion: 'fly' },
+    ]);
+    await importDrawing('');
+    await A.getByRole('heading', { name: 'פרפר בגינה' }).waitFor({ timeout: 20000 });
+    await settled(A);
+    assert.deepEqual(mock.tables.art_memories.at(-1).details.motions.map((m) => m.label), ['הפרפר עף', 'הפרחים זזים ברוח']);
+    await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByText('הצעות לפי מה שמצויר.').waitFor();
+    assert.equal(await A.getByRole('button', { name: 'הצעות לפי הציור' }).count(), 0, 'nothing more to look for');
+    await A.waitForTimeout(3200);
+    await A.screenshot({ path: join(outDir, 'cloud-09-motions.png') });
+    await A.getByRole('button', { name: 'הפרפר עף' }).click();
+    await A.getByRole('heading', { name: 'הפרפר עף' }).waitFor();
+    mock.flags.hint = true;
+    const before = mock.tables.art_animation_jobs.length;
+    await A.getByRole('button', { name: /הנפשה חכמה/ }).click();
+    await A.getByText('ההנפשה בהכנה', { exact: true }).waitFor();
+    assert.equal(mock.tables.art_animation_jobs.length, before + 1);
+    assert.equal(mock.tables.art_animation_jobs.at(-1).hint, 'fly: הפרפר עף');
+  });
+
+  await check('a turn keeps the suggestions on their figures', async () => {
+    mock.titles.push('מכונית אדומה');
+    mock.turns.push(90);
+    mock.motionSets.push([{ label: 'המכונית נוסעת', motion: 'drive', box: [0.1, 0.2, 0.3, 0.4], dir: 'left' }]);
+    await importDrawing('');
+    await A.getByRole('heading', { name: 'מכונית אדומה' }).waitFor({ timeout: 20000 });
+    await A.getByText('סובבתי את הציור').waitFor({ timeout: 20000 });
+    await settled(A);
+    assert.deepEqual(mock.tables.art_memories.at(-1).details.motions, [{ label: 'המכונית נוסעת', motion: 'drive', box: [0.4, 0.1, 0.4, 0.3] }]);
+  });
+
+  await check('no name yet: the animation button says to type one or ask for one, then looks at the drawing for more', async () => {
+    mock.titles.push(null);
+    await importDrawing('');
+    await A.getByRole('button', { name: 'הצעת שם' }).waitFor({ timeout: 20000 });
+    await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByRole('heading', { name: 'לציור עוד אין שם' }).waitFor();
+    await A.getByRole('button', { name: 'שם אוטומטי' }).waitFor();
+    await A.waitForTimeout(3200);
+    await A.screenshot({ path: join(outDir, 'cloud-10-no-name.png') });
+    await A.getByRole('button', { name: 'כתיבת שם עכשיו' }).click();
+    await A.getByLabel('כותרת').fill('דג זהב');
+    await A.getByRole('button', { name: 'שמירה' }).click();
+    await A.getByText('הצעות לפי השם של הציור.').waitFor();
+    assert.deepEqual(await A.locator('.motion-opt b').allTextContents(), ['הדג שוחה', 'תנועה עדינה של כל הציור']);
+    mock.motionSets.push([{ label: 'הדג הכתום שוחה', motion: 'swim', box: [0.2, 0.3, 0.5, 0.3], dir: 'left' }]);
+    await A.getByRole('button', { name: 'הצעות לפי הציור' }).click();
+    await A.getByText('הצעות לפי מה שמצויר.').waitFor({ timeout: 20000 });
+    assert.equal(mock.wants.at(-1), 'motions');
+    await A.getByRole('button', { name: 'הדג הכתום שוחה' }).click();
+    await A.getByRole('button', { name: /במכשיר/ }).click();
+    await A.waitForFunction(() => document.querySelector('.anim-stage canvas')?.dataset.cut === 'true', null, { timeout: 10000 });
+    await A.waitForTimeout(600);
+    await A.screenshot({ path: join(outDir, 'cloud-11-fit.png') });
+    await A.getByRole('button', { name: 'ביטול' }).click();
+    await settled(A);
+    assert.equal(mock.tables.art_memories.at(-1).details.motions[0].label, 'הדג הכתום שוחה');
+  });
+
   await check('settings: every paid action has a free route with its price and waiting time', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('heading', { name: 'פעולות חכמות' }).waitFor();
@@ -369,6 +440,12 @@ try {
     await importDrawing('');
     await A.getByText('השם יהיה מוכן בעוד כדקה').first().waitFor({ timeout: 20000 });
     await A.locator('[data-naming]').waitFor();
+    // Pressing the animation button meanwhile says to wait for the name.
+    await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.locator('[data-name-first]', { hasText: 'השם האוטומטי בדרך ויגיע בעוד כדקה. כדאי להמתין לו' }).waitFor();
+    await A.waitForTimeout(500);
+    await A.screenshot({ path: join(outDir, 'cloud-12-wait.png') });
+    await A.getByRole('button', { name: 'אמתין לשם' }).click();
     await A.getByRole('heading', { name: 'בית עם גג אדום' }).waitFor({ timeout: 30000 });
     await A.locator('[data-auto-title]').waitFor();
     const pic = mock.freePictures.at(-1);
@@ -379,6 +456,20 @@ try {
     const row = mock.tables.art_memories.at(-1);
     assert.equal(row.details.rot, 180);
     assert.equal(row.details.turn, undefined, 'the pending turn is cleared once applied');
+  });
+
+  await check('free route: movements by the drawing arrive within about a minute', async () => {
+    mock.motionSets.push([{ label: 'העשן עולה', motion: 'rise', box: [0.5, 0.05, 0.2, 0.3], dir: 'none' }]);
+    await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByText('הציור נבדק במסלול החינמי').waitFor();
+    await A.getByRole('button', { name: 'הצעות לפי הציור' }).click();
+    await A.getByText('ההצעות לפי הציור יהיו מוכנות בעוד כדקה').waitFor({ timeout: 20000 });
+    await A.locator('[data-seeking]').waitFor();
+    await A.getByText('ההצעות לפי הציור מוכנות').waitFor({ timeout: 30000 });
+    assert.equal(await A.locator('[data-seeking]').count(), 0);
+    await A.getByRole('button', { name: 'הנפשה' }).click();
+    await A.getByRole('button', { name: 'העשן עולה' }).waitFor();
+    await A.keyboard.press('Escape');
   });
 
   await check('animation route "on the device": no sheet and no paid job', async () => {

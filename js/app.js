@@ -11,6 +11,7 @@ import { openCropEditor } from './crop.js';
 import { recordAudio } from './recorder.js';
 import { openAnimator } from './anim.js';
 import * as cloud from './cloud.js';
+import { suggestFromTitle, cleanMotions, turnMotions } from './motion.js';
 
 const APP = document.getElementById('app');
 const MAX_BOOK_PAGES = 250;
@@ -355,6 +356,7 @@ function renderMemory(id) {
         ${m.type !== 'artwork' ? `<span class="chip">${TYPES[m.type]?.label}</span>` : ''}
         ${m.autoTitle ? '<span class="chip sub" data-auto-title>שם אוטומטי</span>' : ''}
         ${state._naming && state._naming.has(m.id) ? `<span class="chip sub" data-naming>${state._naming.get(m.id) ? 'השם יהיה מוכן בעוד כדקה' : 'מחפש שם…'}</span>` : ''}
+        ${state._seeking && state._seeking.has(m.id) ? '<span class="chip sub" data-seeking>מחפש תנועות לציור…</span>' : ''}
       </div>
     </div>
     ${m.caption ? `<div class="bubble">${esc(m.caption)}</div>` : ''}
@@ -569,7 +571,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.4</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.5</p>
   </main>`;
 }
 
@@ -1048,7 +1050,8 @@ async function recropMemory(m) {
   const bImage = blobRecord(processed, 'image', { memoryId: m.id });
   const bThumb = blobRecord(thumb, 'thumb', { memoryId: m.id });
   const old = [m.image, m.thumb];
-  const updated = { ...m, image: bImage.id, thumb: bThumb.id, corners: res.corners, clean: res.clean, updatedAt: Date.now() };
+  // After a new cut the figures sit elsewhere on the page: the suggestions stay, their places do not.
+  const updated = { ...m, image: bImage.id, thumb: bThumb.id, corners: res.corners, clean: res.clean, ...(m.motions ? { motions: m.motions.map(({ box, ...r }) => r) } : {}), updatedAt: Date.now() };
   await db.putMany([['blobs', bImage], ['blobs', bThumb], ['memories', updated]]);
   await db.delMany(old.map((id) => ['blobs', id]));
   old.forEach(forgetUrl);
@@ -1084,7 +1087,7 @@ async function rotateMemory(m, by = 90, { auto = false } = {}) {
   const bThumb = blobRecord(thumb, 'thumb', { memoryId: m.id });
   const old = [m.image, m.thumb];
   const { turn, ...rest } = m;
-  const updated = { ...rest, image: bImage.id, thumb: bThumb.id, rot, ...(auto ? {} : { rotUser: true }), updatedAt: Date.now() };
+  const updated = { ...rest, image: bImage.id, thumb: bThumb.id, rot, ...(auto ? {} : { rotUser: true }), ...(m.motions ? { motions: turnMotions(m.motions, by) } : {}), updatedAt: Date.now() };
   await db.putMany([['blobs', bImage], ['blobs', bThumb], ['memories', updated]]);
   await db.delMany(old.filter(Boolean).map((id) => ['blobs', id]));
   old.forEach(forgetUrl);
@@ -1588,13 +1591,13 @@ async function openExhibition() {
 }
 
 // ---------- Animation made on the device ----------
-async function animateMemory(m) {
+async function animateMemory(m, { motions = [], first = 0 } = {}) {
   const rec = await cloud.ensureBlob(m.image);
   if (!rec || !rec.blob) return;
-  const res = await openAnimator(rec.blob, m.title || 'ציור');
+  const res = await openAnimator(rec.blob, m.title || 'ציור', { motions, first });
   if (!res) return;
   const b = blobRecord(res.blob, 'video', { memoryId: m.id });
-  const att = { id: uid(), kind: 'animation', style: res.style, blob: b.id, duration: res.duration, createdAt: Date.now() };
+  const att = { id: uid(), kind: 'animation', style: res.style, ...(res.label ? { label: res.label } : {}), blob: b.id, duration: res.duration, createdAt: Date.now() };
   const updated = { ...m, attachments: [...(m.attachments || []), att], updatedAt: Date.now() };
   await db.putMany([['blobs', b], ['memories', updated]]);
   Object.assign(m, updated);
@@ -1791,7 +1794,8 @@ async function nameDrawings(ids, { manual = false } = {}) {
       } else {
         state._naming.delete(id);
         if (res.title && m && !m.title) {
-          const updated = { ...m, title: res.title, autoTitle: true, updatedAt: Date.now() };
+          const fit = cleanMotions(res.motions);
+          const updated = { ...m, title: res.title, autoTitle: true, ...(fit.length ? { motions: fit } : {}), updatedAt: Date.now() };
           await db.put('memories', updated);
           Object.assign(m, updated);
           named++;
@@ -1811,12 +1815,13 @@ async function nameDrawings(ids, { manual = false } = {}) {
   return named;
 }
 
-/** Free route: the scheduled task writes the title on the server, and it reaches this device by sync. */
+/** Free route: the scheduled task writes the title (or the movements) on the server, and it reaches this device by sync. */
 let nameTimer = null;
 function awaitNames() {
   clearTimeout(nameTimer);
   const pending = state._naming ? [...state._naming].filter(([, at]) => at) : [];
-  if (!pending.length) return;
+  const seeking = state._seeking ? [...state._seeking] : [];
+  if (!pending.length && !seeking.length) return;
   nameTimer = setTimeout(async () => {
     await cloud.sync();
     if (state._stale) { state._stale = false; await load(); }
@@ -1830,9 +1835,38 @@ function awaitNames() {
       }
       if (!m || m.title || Date.now() - at > NAME_WAIT_MS) { state._naming.delete(id); changed = true; }
     }
+    for (const [id, at] of seeking) {
+      const m = memoryById(id);
+      const got = m && cleanMotions(m.motions).length > 0;
+      if (got) toast('ההצעות לפי הציור מוכנות. לחיצה על "הנפשה" תציג אותן.', 5000);
+      if (!m || got || Date.now() - at > NAME_WAIT_MS) { state._seeking.delete(id); changed = true; }
+    }
     if (changed && !document.querySelector('.scrim') && !state.review) render();
     awaitNames();
   }, 8000);
+}
+
+/**
+ * Ask for movements that fit a drawing by looking at it, by the route chosen in the settings.
+ * Returns 'ready' (they are on the drawing now), 'waiting' (the free route: about a minute) or '' (nothing came).
+ */
+async function seekMotions(m) {
+  const route = state.settings.titleRoute === 'free' ? 'free' : 'paid';
+  state._seeking = state._seeking || new Map();
+  state._seeking.set(m.id, Date.now());
+  let res = {};
+  try {
+    await cloud.sync();
+    res = await cloud.suggestTitle(m.id, { want: 'motions', route, picture: route === 'free' ? await smallPicture(m) : null });
+  } catch { /* offline or not set up */ }
+  if (res.queued) { awaitNames(); return 'waiting'; }
+  state._seeking.delete(m.id);
+  const fit = cleanMotions(res.motions);
+  if (!fit.length) return '';
+  const updated = { ...m, motions: fit, updatedAt: Date.now() };
+  await db.put('memories', updated);
+  Object.assign(m, updated);
+  return 'ready';
 }
 
 // ---------- AI animation (made for the family on the server side) ----------
@@ -1848,26 +1882,102 @@ function animStatusHtml(m) {
   return `<div class="banner" data-anim-status="pending">${art('sparkle')}<div class="grow"><b>ההנפשה בהכנה</b><div class="small">זה לוקח כמה דקות. הסרטון יופיע כאן לבד.</div></div></div>`;
 }
 
-async function chooseAnimation(m) {
-  if (!cloud.signedIn()) return animateMemory(m);
-  if (m.anim && m.anim.status !== 'failed') { toast('ההנפשה כבר בהכנה'); return; }
-  const fixed = { ai: 'ai', local: 'local' }[state.settings.animRoute];
-  const pick = fixed || await openSheet((body, close) => {
+/** The movements offered for a drawing: what the naming step saw in it, otherwise what its name says. */
+function motionsFor(m) {
+  const seen = cleanMotions(m.motions);
+  return seen.length ? { list: seen, seen: true } : { list: suggestFromTitle(m.title), seen: false };
+}
+
+/** A drawing without a name: say whether to wait for the automatic name or to type one. Resolves 'go' to animate anyway. */
+function askForName(m) {
+  const naming = state._naming && state._naming.has(m.id);
+  const slow = naming && state._naming.get(m.id);
+  return openSheet((body, close) => {
     body.innerHTML = `
-      <h2>הנפשה</h2>
-      <div class="make-grid">
-        <button class="make" data-v="ai">${art('sparkle')}<b>הנפשה חכמה</b><span class="small">הציור מתעורר לחיים. יורד מקרדיטי Kling, מוכן בעוד כמה דקות.</span></button>
-        <button class="make" data-v="local">${art('pencil')}<b>הנפשה מהירה</b><span class="small">חינם ומיד, במכשיר. תנועה עדינה.</span></button>
+      <h2>לציור עוד אין שם</h2>
+      <p data-name-first style="margin:6px 0 14px">${naming
+    ? `השם האוטומטי בדרך ויגיע ${slow ? 'בעוד כדקה' : 'בעוד כמה שניות'}. כדאי להמתין לו: לפי השם אציע תנועה שמתאימה לציור, למשל שהפרפר יעוף.`
+    : 'לפי השם אציע תנועה שמתאימה לציור, למשל שהפרפר יעוף. אפשר לכתוב שם עכשיו' + (cloud.signedIn() ? ', או לבקש שם אוטומטי.' : '.')}</p>
+      <div class="stack-btns">
+        ${naming ? '<button type="button" class="btn violet" data-v="wait">אמתין לשם</button>' : ''}
+        <button type="button" class="btn ${naming ? '' : 'violet'}" data-v="type">כתיבת שם עכשיו</button>
+        ${!naming && cloud.signedIn() ? '<button type="button" class="btn" data-v="auto">שם אוטומטי</button>' : ''}
+        <button type="button" class="btn ghost" data-v="go">הנפשה בלי שם</button>
       </div>`;
     body.addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) close(b.dataset.v); });
-  }, { label: 'הנפשה' });
-  if (pick === 'local') return animateMemory(m);
-  if (pick !== 'ai') return;
+  }, { label: 'לציור עוד אין שם' });
+}
+
+/** Choose a movement. Resolves { list, first } (first = -1 for the gentle movement of the whole page), 'seek' or undefined. */
+function pickMotion(m) {
+  const { list, seen } = motionsFor(m);
+  const seeking = state._seeking && state._seeking.has(m.id);
+  const free = state.settings.titleRoute === 'free';
+  return openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>איך להנפיש את ${esc(m.title || 'הציור')}?</h2>
+      <p class="small muted" style="margin:4px 0 12px">${list.length
+    ? (seen ? 'הצעות לפי מה שמצויר.' : 'הצעות לפי השם של הציור.')
+    : (m.title ? 'לא מצאתי בשם משהו שאני יודע להזיז.' : 'בלי שם אין לי הצעה שמתאימה לציור.')}</p>
+      <div class="motion-list">
+        ${list.map((x, i) => `<button type="button" class="motion-opt" data-m="${i}">${art('sparkle')}<b>${esc(x.label)}</b></button>`).join('')}
+        <button type="button" class="motion-opt plain" data-m="-1">${art('pencil')}<b>תנועה עדינה של כל הציור</b></button>
+      </div>
+      ${cloud.signedIn() && !seen ? (seeking
+    ? '<p class="small muted" data-seeking style="margin-top:12px">ההצעות לפי הציור בדרך. הן יופיעו כאן בעוד כדקה.</p>'
+    : `<button type="button" class="btn" data-seek style="margin-top:12px">${ICONS.edit}הצעות לפי הציור</button>
+       <p class="small muted" style="margin-top:6px">${free ? 'הציור נבדק במסלול החינמי. ההצעות מוכנות בעוד כדקה.' : 'הציור נבדק במסלול המהיר, בתשלום קטן. ההצעות מוכנות בעוד כמה שניות.'}</p>`) : ''}`;
+    body.addEventListener('click', (e) => {
+      if (e.target.closest('[data-seek]')) return close('seek');
+      const b = e.target.closest('[data-m]');
+      if (b) close({ list, first: Number(b.dataset.m) });
+    });
+  }, { label: 'בחירת תנועה' });
+}
+
+async function chooseAnimation(m) {
+  if (m.anim && m.anim.status !== 'failed') { toast('ההנפשה כבר בהכנה'); return; }
+  if (!m.title) {
+    const step = await askForName(m);
+    if (step === 'type') {
+      await openMemoryForm(m);
+      if (!m.title) return;
+    } else if (step === 'auto') {
+      const got = await nameDrawings([m.id], { manual: true });
+      if (!got) { toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000); return; }
+      if (!m.title) return; // the free route: the name arrives in about a minute, and the toast said so
+    } else if (step !== 'go') return;
+  }
+  let pick = await pickMotion(m);
+  if (pick === 'seek') {
+    toast('בודק מה מצויר…', 4000);
+    const got = await seekMotions(m);
+    render();
+    if (got === 'waiting') { toast('ההצעות לפי הציור יהיו מוכנות בעוד כדקה. אפשר להמשיך בינתיים.', 5000); return; }
+    if (!got) toast('לא הצלחתי לזהות בציור משהו להזיז.', 5000);
+    pick = await pickMotion(m);
+  }
+  if (!pick || pick === 'seek') return;
+  const chosen = pick.first >= 0 ? pick.list[pick.first] : null;
+  const local = () => animateMemory(m, { motions: pick.list, first: pick.first });
+  if (!cloud.signedIn()) return local();
+  const fixed = { ai: 'ai', local: 'local' }[state.settings.animRoute];
+  const where = fixed || await openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>${chosen ? esc(chosen.label) : 'הנפשה'}</h2>
+      <div class="make-grid">
+        <button class="make" data-v="local">${art('pencil')}<b>במכשיר</b><span class="small">חינם ומיד. ${chosen ? 'הדמות נגזרת מהדף וזזה עליו.' : 'תנועה עדינה.'}</span></button>
+        <button class="make" data-v="ai">${art('sparkle')}<b>הנפשה חכמה</b><span class="small">הציור מתעורר לחיים. יורד מקרדיטי Kling, מוכן בעוד כמה דקות.</span></button>
+      </div>`;
+    body.addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (b) close(b.dataset.v); });
+  }, { label: 'איפה להכין את ההנפשה' });
+  if (where === 'local') return local();
+  if (where !== 'ai') return;
   toast('שולח את הציור…', 4000);
   await cloud.sync();
   if (cloud.getStatus().pending || cloud.getStatus().error) { toast('הציור עוד לא הגיע לארכיון המשפחתי. ננסה שוב כשיהיה חיבור.', 5000); return; }
   let job;
-  try { job = await cloud.requestAnimation(m); } catch { toast('הבקשה לא נשלחה. אפשר לנסות שוב.'); return; }
+  try { job = await cloud.requestAnimation(m, chosen ? `${chosen.motion}: ${chosen.label}` : ''); } catch { toast('הבקשה לא נשלחה. אפשר לנסות שוב.'); return; }
   const updated = { ...m, anim: { job: job.id, status: 'queued', at: Date.now() }, updatedAt: Date.now() };
   await db.put('memories', updated);
   Object.assign(m, updated);

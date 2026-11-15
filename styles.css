@@ -457,6 +457,18 @@ textarea.input { min-height: 96px; resize: vertical; }
 .anim-styles { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .anim-styles button { border: 0; border-radius: 999px; min-height: 44px; padding: 0 16px; background: var(--card); box-shadow: var(--shadow); cursor: pointer; font-weight: 700; }
 .anim-styles button[aria-pressed="true"] { background: var(--violet); color: #fff; }
+.anim-styles button.fit { box-shadow: var(--shadow), inset 0 0 0 2px var(--violet); }
+.stack-btns { display: grid; gap: 10px; }
+.stack-btns .btn { width: 100%; justify-content: center; min-height: 52px; }
+.motion-list { display: grid; gap: 10px; }
+.motion-opt {
+  border: 0; cursor: pointer; background: var(--card); border-radius: 18px; padding: 10px 14px; box-shadow: var(--shadow), inset 0 0 0 2px var(--violet);
+  display: flex; align-items: center; gap: 12px; text-align: start; min-height: 64px; font-size: 18px; color: inherit; font-family: inherit;
+}
+.motion-opt.plain { box-shadow: var(--shadow); }
+.motion-opt .sprite { width: 44px; height: 44px; flex: none; }
+.motion-opt b { font-weight: 800; }
+.motion-opt:active { transform: scale(.98); }
 
 @media print {
   @page { size: A4; margin: 0; }
