@@ -536,7 +536,7 @@ function routesPanelHtml() {
 }
 
 function renderSettings() {
-  const last = state.settings.lastBackupAt ? new Date(state.settings.lastBackupAt).toLocaleDateString('he-IL') : 'עוד לא';
+  const last = state.settings.lastBackupAt ? formatDate(todayStr(new Date(state.settings.lastBackupAt))) : 'עוד לא';
   return `${header({ title: 'הגדרות', backTo: '' })}
   <main>
     <div class="panel">
@@ -560,6 +560,11 @@ function renderSettings() {
       </div>
     </div>
     <div class="panel">
+      <div class="panel-head">${art('star')}<div><h2>ציורון כאפליקציה</h2><p>${isInstalled() ? 'שמור במסך הבית של המכשיר הזה' : 'סמל במסך הבית, כמו כל אפליקציה'}</p></div></div>
+      <p class="small muted">לבני משפחה שמצטרפים: שולחים להם קישור הזמנה, ואחרי ההצטרפות מוצג להם ההסבר הזה לפי הטלפון שלהם.</p>
+      <button class="btn" data-act="install-guide">איך שומרים במסך הבית</button>
+    </div>
+    <div class="panel">
       <div class="panel-head">${art('bucket-blue')}<div><h2>אחסון</h2><p>בלי הגבלת כמות</p></div></div>
       <p class="small" data-storage>בודק…</p>
       <button class="btn" data-act="persist">בקשת אחסון קבוע</button>
@@ -571,7 +576,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.5</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.6</p>
   </main>`;
 }
 
@@ -752,6 +757,7 @@ async function handleAction(act, r) {
       return render();
     case 'cloud-signin': return openSignIn();
     case 'join-retry': return render();
+    case 'install-guide': return openInstallGuide();
     case 'cloud-sync': {
       await cloud.sync();
       const st = cloud.getStatus();
@@ -1258,6 +1264,87 @@ function openMemoryForm(m, type = null, { returnOnly = false } = {}) {
 }
 
 // ---------- Children ----------
+/**
+ * Choose which part of a photo becomes the round profile picture: drag to move, slider or pinch to zoom.
+ * Resolves a 320 × 320 canvas, or undefined when cancelled. The picture always covers the whole circle.
+ */
+function openAvatarCrop(src) {
+  const OUT = 320, VIEW = 640;
+  const fit = Math.max(1 / src.width, 1 / src.height); // scale at which the short side fills the square (in squares per pixel)
+  let zoom = 1, cx = src.width / 2, cy = src.height / 2; // the photo point at the centre of the circle
+  return openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>תמונת פרופיל</h2>
+      <p class="small muted" style="margin:4px 0 12px">גוררים את התמונה כדי למקם, ומגדילים עם המחוון. מה שבתוך העיגול יישמר.</p>
+      <div class="av-crop" data-stage tabindex="0" role="img" aria-label="מיקום התמונה בעיגול. חיצים מזיזים."><canvas width="${VIEW}" height="${VIEW}"></canvas></div>
+      <div class="field" style="margin-top:12px"><label for="av-zoom">הגדלה</label><input id="av-zoom" type="range" min="1" max="4" step="0.01" value="1" data-zoom></div>
+      <div class="btn-row" style="justify-content:space-between;margin-top:8px">
+        <button type="button" class="btn ghost" data-cancel>ביטול</button>
+        <button type="button" class="btn primary" data-ok>אישור</button>
+      </div>`;
+    const stage = body.querySelector('[data-stage]');
+    const canvas = stage.querySelector('canvas');
+    const slider = body.querySelector('[data-zoom]');
+    const side = () => 1 / (fit * zoom); // photo pixels across the square
+    const clamp = () => {
+      const h = side() / 2;
+      cx = Math.min(Math.max(cx, h), src.width - h);
+      cy = Math.min(Math.max(cy, h), src.height - h);
+    };
+    const paintTo = (c) => {
+      const g = c.getContext('2d');
+      const sdim = side();
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(src, cx - sdim / 2, cy - sdim / 2, sdim, sdim, 0, 0, c.width, c.height);
+    };
+    const draw = () => { clamp(); paintTo(canvas); stage.dataset.view = [Math.round(cx), Math.round(cy), Math.round(side())].join(','); };
+    draw();
+    const setZoom = (z) => { zoom = Math.min(4, Math.max(1, z)); slider.value = String(zoom); draw(); };
+    slider.addEventListener('input', () => setZoom(Number(slider.value)));
+    const pts = new Map();
+    let pinch = 0;
+    stage.addEventListener('pointerdown', (e) => { stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); pinch = 0; });
+    stage.addEventListener('pointermove', (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const k = side() / stage.clientWidth; // photo pixels per screen pixel
+      if (pts.size === 1) { cx -= (e.clientX - p.x) * k; cy -= (e.clientY - p.y) * k; }
+      p.x = e.clientX; p.y = e.clientY;
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinch) setZoom(zoom * d / pinch);
+        pinch = d;
+        return;
+      }
+      draw();
+    });
+    const up = (e) => { pts.delete(e.pointerId); pinch = 0; };
+    stage.addEventListener('pointerup', up);
+    stage.addEventListener('pointercancel', up);
+    stage.addEventListener('keydown', (e) => {
+      const step = side() * 0.05;
+      const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+      if (!move) return;
+      e.preventDefault();
+      cx += move[0]; cy += move[1];
+      draw();
+    });
+    // Escape closes only this sheet, not the child's form underneath.
+    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(undefined); } };
+    document.addEventListener('keydown', onEsc, true);
+    const done = (v) => { document.removeEventListener('keydown', onEsc, true); close(v); };
+    body.querySelector('[data-cancel]').addEventListener('click', () => done(undefined));
+    body.querySelector('[data-ok]').addEventListener('click', () => {
+      const out = document.createElement('canvas');
+      out.width = out.height = OUT;
+      clamp();
+      paintTo(out);
+      done(out);
+    });
+  }, { label: 'תמונת פרופיל' });
+}
+
 function openChildForm(child) {
   // Render the page underneath first so the sheet has context.
   const base = state.children.length ? (child ? renderSettings() : renderHome()) : renderWelcome();
@@ -1301,11 +1388,9 @@ function openChildForm(child) {
       if (!files.length) return;
       try {
         const src = await decode(files[0]);
-        const s = Math.min(src.width, src.height);
-        const c = document.createElement('canvas');
-        c.width = c.height = 320;
-        c.getContext('2d').drawImage(src, (src.width - s) / 2, (src.height - s) / 2, s, s, 0, 0, 320, 320);
+        const c = await openAvatarCrop(src);
         if (src.close) src.close();
+        if (!c) return; // cancelled: the picture chosen before stays
         avatarBlob = await canvasToBlob(c, 'image/jpeg', 0.88);
         removeAvatar = false; usePhoto = true;
         photoUrl = URL.createObjectURL(avatarBlob);
@@ -1734,17 +1819,82 @@ async function joinFlow(code) {
     });
   }, { label: 'הצטרפות למשפחה' });
   if (!name) { go('', { replace: true }); return; }
+  let joined = false;
   try {
     const childId = await cloud.acceptInvite(code, name);
     await cloud.sync();
     await load();
     if (childById(childId)) { state.settings.activeChild = childId; saveSettings(); }
     toast('הצטרפת. הציורים כבר כאן.');
+    joined = true;
   } catch {
     toast('ההזמנה לא תקפה או שכבר נעשה בה שימוש. אפשר לבקש קישור חדש.', 6000);
   }
   state._joining = false;
   go('', { replace: true });
+  // A new family member arrived through a link in the browser: show how to keep ציורון as an app on the phone.
+  if (joined && !isInstalled()) openInstallGuide();
+}
+
+// ---------- ציורון as an app on the phone ----------
+let installPrompt = null; // Android Chrome offers its own install dialog; kept until the guide's button is pressed
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });
+window.addEventListener('appinstalled', () => { installPrompt = null; });
+
+function isInstalled() {
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+}
+
+/** 'ios-safari' | 'ios-chrome' | 'samsung' | 'android' | 'other', from the browser's own description of itself. */
+function deviceKind(ua = navigator.userAgent, touch = navigator.maxTouchPoints || 0) {
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && touch > 1);
+  if (ios) return /CriOS|FxiOS|EdgiOS/.test(ua) ? 'ios-chrome' : 'ios-safari';
+  if (/Android/.test(ua)) return /SamsungBrowser/.test(ua) ? 'samsung' : 'android';
+  return 'other';
+}
+
+const INSTALL_STEPS = {
+  'ios-safari': ['פותחים את ציורון בדפדפן Safari.', 'לוחצים על כפתור השיתוף: ריבוע עם חץ למעלה, בתחתית המסך.', 'גוללים ברשימה ובוחרים "הוסף למסך הבית".', 'לוחצים "הוסף". הסמל של ציורון מופיע במסך הבית.'],
+  'ios-chrome': ['לוחצים על כפתור השיתוף: ריבוע עם חץ למעלה, בקצה שורת הכתובת למעלה.', 'גוללים ברשימה ובוחרים "הוסף למסך הבית".', 'לוחצים "הוסף". הסמל של ציורון מופיע במסך הבית.'],
+  android: ['פותחים את ציורון בדפדפן Chrome.', 'לוחצים על שלוש הנקודות בפינה העליונה של המסך.', 'בוחרים "הוספה למסך הבית" או "התקנת האפליקציה".', 'לוחצים "התקנה". הסמל של ציורון מופיע במסך הבית.'],
+  samsung: ['לוחצים על שלושת הקווים בפינה התחתונה של המסך.', 'בוחרים "הוספת דף אל" ואז "מסך הבית".', 'לוחצים "הוספה". הסמל של ציורון מופיע במסך הבית.'],
+};
+
+/** Steps for keeping ציורון on the home screen, for the phone in hand, with the other kind one tap away. */
+function openInstallGuide() {
+  const kind = deviceKind();
+  let tab = kind.startsWith('ios') ? 'ios' : 'android';
+  return openSheet((body, close) => {
+    const draw = () => {
+      const key = tab === 'ios' ? (kind === 'ios-chrome' ? 'ios-chrome' : 'ios-safari') : (kind === 'samsung' ? 'samsung' : 'android');
+      const mine = (tab === 'ios') === kind.startsWith('ios') && kind !== 'other';
+      body.innerHTML = `
+        <h2>ציורון כאפליקציה בטלפון</h2>
+        <p style="margin:6px 0 12px">${isInstalled() ? 'ציורון כבר שמור כאפליקציה במכשיר הזה. כך מוסיפים אותו בטלפון נוסף:' : 'שומרים את ציורון במסך הבית, והוא נפתח כמו כל אפליקציה: במסך מלא, בלי שורת כתובת.'}</p>
+        <div class="seg" role="group" aria-label="סוג הטלפון" style="margin-bottom:12px">
+          <button type="button" data-tab="android" aria-pressed="${tab === 'android'}">אנדרואיד</button>
+          <button type="button" data-tab="ios" aria-pressed="${tab === 'ios'}">אייפון</button>
+        </div>
+        ${tab === 'android' && installPrompt && !isInstalled() ? '<button type="button" class="btn violet" data-install style="width:100%;justify-content:center;margin-bottom:12px">התקנה עכשיו</button><p class="small muted" style="margin-bottom:8px">או בעצמך:</p>' : ''}
+        <ol class="steps" data-steps="${key}">${INSTALL_STEPS[key].map((t) => `<li>${esc(t)}</li>`).join('')}</ol>
+        <p class="small muted" style="margin-top:12px">${tab === 'ios'
+    ? 'אחרי ההוספה פותחים את ציורון מהסמל שבמסך הבית ונכנסים פעם אחת עם אותו אימייל ואותה סיסמה. הציורים מגיעים לבד.'
+    : 'אם ציורון מבקש כניסה אחרי ההתקנה, נכנסים עם אותו אימייל ואותה סיסמה. הציורים מגיעים לבד.'}${mine ? '' : ' ההסבר הזה מיועד לטלפון מהסוג שנבחר למעלה.'}</p>
+        <div class="btn-row" style="justify-content:flex-end;margin-top:12px"><button type="button" class="btn" data-close>הבנתי</button></div>`;
+    };
+    draw();
+    body.addEventListener('click', async (e) => {
+      const t = e.target.closest('[data-tab]');
+      if (t) { tab = t.dataset.tab; return draw(); }
+      if (e.target.closest('[data-close]')) return close();
+      if (e.target.closest('[data-install]') && installPrompt) {
+        const ask = installPrompt;
+        installPrompt = null;
+        try { await ask.prompt(); } catch { /* the browser declined to show its dialog; the steps below still work */ }
+        draw();
+      }
+    });
+  }, { label: 'ציורון כאפליקציה בטלפון' });
 }
 
 // ---------- Automatic title ----------

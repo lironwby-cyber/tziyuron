@@ -55,8 +55,18 @@ export function ageGroupLabel(age) {
 
 const HE_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
 
-/** "20 בינואר 2026" */
+const HE_DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
+/** "יום ראשון 24/06/2021" (Saturday is "שבת 26/06/2021"): the way a date is shown everywhere in the app. */
 export function formatDate(dateStr) {
+  const d = parseDate(dateStr);
+  if (!d) return '';
+  const day = d.getDay() === 6 ? 'שבת' : `יום ${HE_DAYS[d.getDay()]}`;
+  return `${day} ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+
+/** "20 בינואר 2026": the date in words, kept so that a search for a month's name still finds its drawings. */
+export function formatDateWords(dateStr) {
   const d = parseDate(dateStr);
   if (!d) return '';
   return `${d.getDate()} ב${HE_MONTHS[d.getMonth()]} ${d.getFullYear()}`;

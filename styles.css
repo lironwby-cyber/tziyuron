@@ -513,3 +513,12 @@ textarea.input { min-height: 96px; resize: vertical; }
 .route b { font-weight: 800; font-size: 18px; }
 .route .seg { margin-inline-end: 0; justify-self: start; }
 .route p { margin: 0; }
+
+.steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 10px; }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 36px 1fr; gap: 12px; align-items: center; background: var(--card); border-radius: 16px; padding: 10px 12px; box-shadow: var(--shadow); font-size: 17px; }
+.steps li::before { content: counter(step); width: 36px; height: 36px; border-radius: 50%; background: var(--violet); color: #fff; display: grid; place-items: center; font-weight: 800; }
+.av-crop { position: relative; width: min(100%, 320px); aspect-ratio: 1; margin: 0 auto; border-radius: 22px; overflow: hidden; touch-action: none; cursor: grab; background: var(--bg-2); box-shadow: var(--shadow); }
+.av-crop:active { cursor: grabbing; }
+.av-crop canvas { width: 100%; height: 100%; display: block; }
+.av-crop::after { content: ''; position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(20, 16, 40, .55); outline: 3px solid #fff; outline-offset: -3px; pointer-events: none; }
+.av-crop:focus-visible { outline: 3px solid var(--violet); outline-offset: 3px; }

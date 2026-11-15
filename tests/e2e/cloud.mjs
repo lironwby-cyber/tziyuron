@@ -124,6 +124,15 @@ try {
     await signIn(B, 'savta@example.com', 'secret-savta');
     await B.getByLabel('שם', { exact: true }).fill('סבתא רותי');
     await B.getByRole('button', { name: 'הצטרפות' }).click();
+    // The new member is shown how to keep the app on the phone's home screen.
+    await B.getByRole('heading', { name: 'ציורון כאפליקציה בטלפון' }).waitFor({ timeout: 15000 });
+    assert.equal(await B.locator('.steps li').count(), 4);
+    await B.waitForTimeout(3200);
+    await B.screenshot({ path: join(outDir, 'cloud-03a-install.png') });
+    await B.getByRole('button', { name: 'אייפון' }).click();
+    await B.locator('[data-steps="ios-safari"]').waitFor();
+    await B.getByText('גוללים ברשימה ובוחרים "הוסף למסך הבית".').waitFor();
+    await B.getByRole('button', { name: 'הבנתי' }).click();
     await B.getByRole('button', { name: 'נועה', exact: true }).waitFor({ timeout: 15000 });
     await B.getByText('טיל לירח').first().waitFor();
     await loaded(B, '.frame img');
@@ -132,6 +141,26 @@ try {
     await loaded(B, '[data-main]');
     const w = await B.evaluate(() => document.querySelector('[data-main]').naturalWidth);
     assert.ok(w > 600, `full drawing downloaded on demand (${w}px)`);
+  });
+
+  await check('the install guide matches the phone in hand, and is always in the settings', async () => {
+    for (const [ua, steps, tab] of [
+      ['Mozilla/5.0 (iPhone; CPU iPhone OS 27_3_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/158.0.8127.35 Mobile/15E148 Safari/604.1', 'ios-chrome', 'אייפון'],
+      ['Mozilla/5.0 (iPhone; CPU iPhone OS 27_3_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1', 'ios-safari', 'אייפון'],
+      ['Mozilla/5.0 (Linux; Android 16; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Mobile Safari/537.36', 'android', 'אנדרואיד'],
+      ['Mozilla/5.0 (Linux; Android 16; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/29.0 Chrome/150.0.0.0 Mobile Safari/537.36', 'samsung', 'אנדרואיד'],
+    ]) {
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, userAgent: ua, deviceScaleFactor: Number(process.env.SHOT_SCALE) || 1 });
+      const P = await ctx.newPage();
+      await P.goto(BASE + '#/settings');
+      await P.getByRole('button', { name: 'איך שומרים במסך הבית' }).click();
+      await P.locator(`[data-steps="${steps}"]`).waitFor();
+      assert.equal(await P.getByRole('button', { name: tab }).getAttribute('aria-pressed'), 'true', `${steps} opens on its own tab`);
+      assert.equal(await P.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth) <= 0, true);
+      await P.waitForTimeout(400);
+      await P.screenshot({ path: join(outDir, `cloud-03b-install-${steps}.png`) });
+      await ctx.close();
+    }
   });
 
   await check('a used invitation does not work a second time', async () => {

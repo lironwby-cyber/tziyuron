@@ -1,5 +1,5 @@
 // Pure data helpers: types, search, grouping, backup paths.
-import { ageAt, ageGroupLabel, formatDate } from './age.js';
+import { ageAt, ageGroupLabel, formatDate, formatDateWords } from './age.js';
 
 export const TYPES = {
   artwork: { label: 'ציור', icon: '🎨' },
@@ -35,7 +35,7 @@ export function filterMemories(memories, children, { childId = null, query = '',
       if (!words.length) return true;
       const child = byId.get(m.childId);
       const hay = normalize([
-        m.title, m.caption, TYPES[m.type]?.label, child?.name, formatDate(m.date),
+        m.title, m.caption, TYPES[m.type]?.label, child?.name, formatDate(m.date), formatDateWords(m.date),
       ].join(' '));
       return words.every((w) => hay.includes(w));
     })

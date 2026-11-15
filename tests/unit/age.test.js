@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDate, ageAt, ageLabel, ageGroupLabel, formatDate, todayStr } from '../../js/age.js';
+import { parseDate, ageAt, ageLabel, ageGroupLabel, formatDate, formatDateWords, todayStr } from '../../js/age.js';
 
 test('parseDate rejects invalid dates', () => {
   assert.equal(parseDate('2025-02-31'), null);
@@ -26,6 +26,10 @@ test('Hebrew labels', () => {
   assert.equal(ageLabel(null), '');
   assert.equal(ageGroupLabel({ years: 5, months: 2 }), 'גיל 5');
   assert.equal(ageGroupLabel(null), 'בלי גיל');
-  assert.equal(formatDate('2026-01-20'), '20 בינואר 2026');
+  assert.equal(formatDate('2026-01-20'), 'יום שלישי 20/01/2026');
+  assert.equal(formatDate('2021-06-27'), 'יום ראשון 27/06/2021');
+  assert.equal(formatDate('2021-06-26'), 'שבת 26/06/2021');
+  assert.equal(formatDate('2025-03-05'), 'יום רביעי 05/03/2025');
+  assert.equal(formatDateWords('2026-01-20'), '20 בינואר 2026');
   assert.equal(todayStr(new Date(2026, 10, 3)), '2026-11-03');
 });
