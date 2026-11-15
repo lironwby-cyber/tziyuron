@@ -129,6 +129,15 @@ export async function signUp(email, password) {
   return { confirm: true };
 }
 
+/** Is this the signed-in account's password? Changes nothing: used to let a parent reset a forgotten kids-mode code. */
+export async function verifyPassword(password) {
+  if (!session || !session.user.email) return false;
+  try { await authCall('token?grant_type=password', { email: session.user.email, password }); return true; } catch (err) {
+    if (err instanceof TypeError) throw err;
+    return false;
+  }
+}
+
 export async function signOut() {
   const token = session && session.access_token;
   saveSession(null);

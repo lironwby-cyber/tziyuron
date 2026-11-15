@@ -439,6 +439,111 @@ try {
     await page.getByText('טיל לירח').waitFor();
   });
 
+  const typePin = async (pin) => { for (const d of pin) await page.getByRole('dialog').getByRole('button', { name: d, exact: true }).click(); };
+
+  await check('kids mode: a code is set, the kids screen shows only drawings, and every address stays on it', async () => {
+    await page.goto(BASE + '#/settings');
+    await page.getByRole('button', { name: 'קביעת קוד' }).waitFor();
+    await page.getByRole('button', { name: 'מעבר למצב ילדים' }).click();
+    await page.getByRole('dialog', { name: 'קוד חדש להורים' }).waitFor();
+    await page.waitForTimeout(300);
+    await shot('30-kids-pin');
+    await typePin('4821');
+    await page.getByRole('dialog', { name: 'שוב, לאישור' }).waitFor();
+    await typePin('4822');
+    await page.getByText('שני הקודים לא זהים. הקוד לא נשמר').waitFor();
+    assert.equal(await page.evaluate(() => window.__tziyuron.state.settings.mode || 'parent'), 'parent', 'a mistyped code does not switch');
+    await page.getByRole('button', { name: 'מעבר למצב ילדים' }).click();
+    await typePin('4821');
+    await page.getByRole('dialog', { name: 'שוב, לאישור' }).waitFor();
+    await typePin('4821');
+    await page.locator('.kid-title').waitFor();
+    await page.locator('.kid-tile img').first().evaluate((i) => i.decode());
+    assert.equal(await page.locator('.fab, [data-act], [data-go], [data-mem]').count(), 0, 'nothing of the parent screens is on the page');
+    const saved = await page.evaluate(() => JSON.stringify(window.__tziyuron.state.settings.kidPin));
+    assert.ok(!saved.includes('4821') && /"hash":"[0-9a-f]{64}"/.test(saved), 'the code is kept as a digest');
+    await noOverflow();
+    await page.waitForTimeout(2800);
+    await shot('31-kids-home');
+    for (const hash of ['#/settings', '#/child/new', '#/memory/x', '#/book']) {
+      await page.goto(BASE + hash);
+      await page.locator('.kid-title').waitFor();
+      assert.equal(await page.getByRole('dialog').count(), 0);
+      assert.equal(await page.locator('[data-act], [data-go]').count(), 0);
+    }
+    await page.reload();
+    await page.locator('.kid-title').waitFor();
+  });
+
+  await check('kids mode: a drawing opens big, next and previous work, the "new" mark leaves once it was opened', async () => {
+    const tiles = await page.locator('.kid-tile').count();
+    assert.ok(tiles >= 2, `tiles: ${tiles}`);
+    const news = await page.locator('.kid-new').count();
+    assert.ok(news >= 1, 'fresh drawings are marked new');
+    await page.locator('.kid-tile').first().click();
+    await page.locator('.kid-view img, .kid-view video').first().waitFor();
+    assert.equal((await page.locator('.kid-count').textContent()).trim(), `1 מתוך ${tiles}`);
+    assert.equal(await page.getByRole('button', { name: 'הציור הקודם' }).count(), 0, 'no "previous" on the first one');
+    const first = await page.locator('.kid-name').textContent();
+    await page.getByRole('button', { name: 'הציור הבא' }).click();
+    await page.waitForFunction((t) => document.querySelector('.kid-count')?.textContent.trim().startsWith('2 '), null);
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction(() => document.querySelector('.kid-count')?.textContent.trim().startsWith('1 '));
+    assert.equal(await page.locator('.kid-name').textContent(), first);
+    for (const b of await page.locator('.kid-view button').all()) {
+      const box = await b.boundingBox();
+      assert.ok(box.width >= 54 && box.height >= 54, `a button of ${Math.round(box.width)}x${Math.round(box.height)} is too small for a child`);
+    }
+    await noOverflow();
+    await page.waitForTimeout(300);
+    await shot('32-kids-drawing');
+    await page.getByRole('button', { name: 'כל הציורים' }).click();
+    await page.locator('.kid-title').waitFor();
+    assert.equal(await page.locator('.kid-new').count(), news - 2, 'the two that were opened are no longer new');
+    // The same screens on a tablet lying on its side.
+    await page.setViewportSize({ width: 1180, height: 820 });
+    await page.waitForTimeout(300);
+    await noOverflow();
+    await shot('33-kids-home-tablet');
+    await page.locator('.kid-tile').nth(1).click();
+    await page.locator('.kid-view img, .kid-view video').first().waitFor();
+    await page.waitForTimeout(300);
+    await noOverflow();
+    await shot('34-kids-drawing-tablet');
+    await page.getByRole('button', { name: 'כל הציורים' }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+  });
+
+  await check('kids mode: only the right code leads back to the parent screens; wrong tries are counted and then rest', async () => {
+    await page.getByRole('button', { name: 'מסך הורים' }).click();
+    await page.getByRole('dialog', { name: 'קוד הורים' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'שכחתי את הקוד' }).count(), 0, 'no reset without a family account');
+    await typePin('0000');
+    await page.getByText('הקוד לא נכון').waitFor();
+    await page.locator('.kid-title').waitFor();
+    await page.getByRole('button', { name: 'מסך הורים' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'ביטול' }).click();
+    assert.equal(await page.evaluate(() => window.__tziyuron.state.settings.mode), 'kid');
+    // Five wrong tries: the pad rests.
+    await page.evaluate(async () => { const t = window.__tziyuron; t.state.settings.kidFails = 5; t.state.settings.kidFailAt = Date.now(); await t.saveSettings(); });
+    await page.getByRole('button', { name: 'מסך הורים' }).click();
+    await page.getByText(/יותר מדי ניסיונות\. אפשר לנסות שוב בעוד \d+ שניות/).waitFor();
+    assert.equal(await page.getByRole('dialog').count(), 0);
+    await page.evaluate(async () => { const t = window.__tziyuron; t.state.settings.kidFailAt = Date.now() - 31000; await t.saveSettings(); });
+    await page.getByRole('button', { name: 'מסך הורים' }).click();
+    await typePin('4821');
+    await page.locator('.fab').waitFor();
+    assert.equal(await page.evaluate(() => window.__tziyuron.state.settings.kidFails), 0);
+    // Changing the code asks for the current one first.
+    await page.goto(BASE + '#/settings');
+    await page.getByRole('button', { name: 'שינוי קוד' }).click();
+    await page.getByRole('dialog', { name: 'הקוד הנוכחי' }).waitFor();
+    await typePin('1111');
+    await page.getByText('הקוד לא נכון').waitFor();
+    assert.equal(await page.getByRole('dialog').count(), 0, 'a wrong current code opens nothing');
+    await page.goto(BASE);
+  });
+
   await check('works offline after the first visit', async () => {
     await page.evaluate(() => navigator.serviceWorker.ready);
     await page.reload();

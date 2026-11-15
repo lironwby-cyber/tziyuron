@@ -12,6 +12,7 @@ import { recordAudio } from './recorder.js';
 import { openAnimator } from './anim.js';
 import * as cloud from './cloud.js';
 import { suggestFromTitle, cleanMotions, turnMotions } from './motion.js';
+import { validPin, makePin, checkPin, isPinRecord, lockWait, kidList, isNew, markSeen, kidClip, kidVoices } from './kids.js';
 
 const APP = document.getElementById('app');
 const MAX_BOOK_PAGES = 250;
@@ -114,6 +115,13 @@ window.addEventListener('hashchange', () => { state._navCount++; render(); });
 async function render() {
   const r = route();
   if (state._stale) { state._stale = false; await load(); }
+  if (kidMode()) {
+    // In kids mode every address shows the kids' screens: there is no way to the parent screens without the code.
+    APP.innerHTML = renderKids(r);
+    document.title = 'ציורון';
+    await hydrate();
+    return;
+  }
   if (r.name === 'join') { joinFamily(r.id); return; }
   let view;
   if (!state.children.length && r.name !== 'settings' && r.name !== 'child') view = renderWelcome();
@@ -503,6 +511,288 @@ function backupAlertHtml() {
     <button class="btn sunny" data-go="settings">להגדרות</button></div>`;
 }
 
+// ---------- Kids mode ----------
+// A device is used by a parent or by a child. The kids' screens show drawings only: no delete, no edit, no
+// settings. Going back to the parent screens needs the code the parent set.
+const kidMode = () => state.settings.mode === 'kid';
+
+function kidChild() {
+  return childById(state.settings.activeChild) || state.children[0] || null;
+}
+
+function kidsPanelHtml() {
+  const has = isPinRecord(state.settings.kidPin);
+  return `<div class="panel" data-kids-panel>
+    <div class="panel-head">${art('tablet')}<div><h2>מצב ילדים</h2><p>${has ? 'הקוד להורים מוגדר' : 'עוד לא נקבע קוד להורים'}</p></div></div>
+    <p class="small muted">מסך גדול ופשוט לילדים: רק לראות את הציורים, להפעיל הנפשות ולהקשיב להקלטות. אי אפשר למחוק או לשנות דבר, והחזרה למסך ההורים היא רק עם קוד של 4 ספרות.${cloud.signedIn() ? ' הקוד זהה בכל המכשירים של החשבון.' : ' בלי חשבון משפחתי אין דרך לשחזר קוד שנשכח.'}</p>
+    <div class="btn-row">
+      <button class="btn sunny" data-act="kid-enter" ${state.children.length ? '' : 'disabled'}>מעבר למצב ילדים</button>
+      <button class="btn" data-act="kid-pin">${has ? 'שינוי קוד' : 'קביעת קוד'}</button>
+    </div>
+  </div>`;
+}
+
+/** The code pad. Resolves to 4 digits, 'forgot', or null when closed. */
+function askPin(title, text, { forgot = false } = {}) {
+  return openSheet((body, close) => {
+    let pin = '';
+    body.innerHTML = `
+      <div class="pinpad">
+        <h2>${esc(title)}</h2>
+        ${text ? `<p class="muted">${esc(text)}</p>` : ''}
+        <div class="pin-dots" data-dots role="status" aria-label="0 ספרות מתוך 4"><i></i><i></i><i></i><i></i></div>
+        <div class="pin-keys" dir="ltr">
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => `<button type="button" data-digit="${d}">${d}</button>`).join('')}
+          <button type="button" class="soft" data-cancel>ביטול</button>
+          <button type="button" data-digit="0">0</button>
+          <button type="button" class="soft" data-erase aria-label="מחיקת ספרה">${ICONS.erase}</button>
+        </div>
+        ${forgot ? '<button type="button" class="btn ghost" data-forgot>שכחתי את הקוד</button>' : ''}
+      </div>`;
+    const paint = () => {
+      const dots = $('[data-dots]', body);
+      [...dots.children].forEach((el, i) => el.classList.toggle('on', i < pin.length));
+      dots.setAttribute('aria-label', `${pin.length} ספרות מתוך 4`);
+    };
+    const add = (d) => {
+      if (pin.length >= 4) return;
+      pin += d; paint();
+      if (pin.length === 4) setTimeout(() => close(pin), 120);
+    };
+    body.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.digit !== undefined) add(b.dataset.digit);
+      else if (b.dataset.erase !== undefined) { pin = pin.slice(0, -1); paint(); }
+      else if (b.dataset.cancel !== undefined) close(null);
+      else if (b.dataset.forgot !== undefined) close('forgot');
+    });
+    const onKey = (e) => {
+      if (!body.isConnected) { document.removeEventListener('keydown', onKey); return; }
+      if (/^\d$/.test(e.key)) add(e.key);
+      else if (e.key === 'Backspace') { pin = pin.slice(0, -1); paint(); }
+    };
+    document.addEventListener('keydown', onKey);
+  }, { dialog: true, label: title }).then((v) => v || null);
+}
+
+/** Sets a new code: typed twice. Resolves true when a code was saved. */
+async function setPinFlow() {
+  const first = await askPin('קוד חדש להורים', 'ארבע ספרות. הקוד יידרש כדי לצאת ממצב ילדים.');
+  if (!validPin(first)) return false;
+  const again = await askPin('שוב, לאישור', 'מקלידים את אותו קוד פעם נוספת.');
+  if (!validPin(again)) return false;
+  if (again !== first) { toast('שני הקודים לא זהים. הקוד לא נשמר'); return false; }
+  state.settings.kidPin = await makePin(first);
+  state.settings.kidFails = 0;
+  await saveSettings();
+  await savePrefs();
+  toast('הקוד נשמר');
+  return true;
+}
+
+/** Asks for the parents' code. Resolves true when it was typed right (or reset through the account password). */
+async function passPin(title = 'קוד הורים') {
+  const wait = lockWait(state.settings.kidFails || 0, state.settings.kidFailAt || 0, Date.now());
+  if (wait > 0) { toast(`יותר מדי ניסיונות. אפשר לנסות שוב בעוד ${Math.ceil(wait / 1000)} שניות`); return false; }
+  const pin = await askPin(title, 'מקלידים את הקוד של 4 הספרות.', { forgot: cloud.signedIn() });
+  if (pin === 'forgot') return forgotPin();
+  if (!pin) return false;
+  if (await checkPin(pin, state.settings.kidPin)) {
+    state.settings.kidFails = 0;
+    await saveSettings();
+    return true;
+  }
+  state.settings.kidFails = (state.settings.kidFails || 0) + 1;
+  state.settings.kidFailAt = Date.now();
+  await saveSettings();
+  toast('הקוד לא נכון');
+  return false;
+}
+
+/** A forgotten code is replaced after the account's own password is typed. */
+async function forgotPin() {
+  const ok = await openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>שכחתי את הקוד</h2>
+      <p class="muted">מקלידים את הסיסמה של החשבון המשפחתי, ואז קובעים קוד חדש.</p>
+      <form class="form" novalidate>
+        <label class="field"><span>סיסמה</span><input name="password" type="password" dir="ltr" autocomplete="current-password" required></label>
+        <p class="small" data-err role="alert" style="color:var(--red-deep);min-height:1.4em"></p>
+        <div class="btn-row"><button class="btn" type="button" data-cancel>ביטול</button><button class="btn primary" type="submit">המשך</button></div>
+      </form>`;
+    $('[data-cancel]', body).addEventListener('click', () => close(false));
+    $('form', body).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = $('[data-err]', body);
+      const password = String(new FormData(e.target).get('password') || '');
+      if (!password) return;
+      try {
+        if (await cloud.verifyPassword(password)) close(true);
+        else err.textContent = 'הסיסמה לא נכונה.';
+      } catch { err.textContent = 'אין חיבור לרשת.'; }
+    });
+  }, { dialog: true, label: 'שכחתי את הקוד' });
+  if (!ok) return false;
+  return setPinFlow();
+}
+
+async function changePin() {
+  if (isPinRecord(state.settings.kidPin) && !(await passPin('הקוד הנוכחי'))) return;
+  await setPinFlow();
+  if (route().name === 'settings') render();
+}
+
+async function enterKid() {
+  if (!state.children.length) { toast('קודם מוסיפים ילד'); return; }
+  if (!isPinRecord(state.settings.kidPin) && !(await setPinFlow())) return;
+  state.settings.mode = 'kid';
+  state.settings.modeAsked = true;
+  state.selecting = false; state.selected.clear(); state.query = '';
+  if (!state.settings.activeChild && state.children.length) state.settings.activeChild = state.children[0].id;
+  await saveSettings();
+  history.replaceState(null, '', '#/');
+  render();
+  scrollTo(0, 0);
+}
+
+async function leaveKid() {
+  if (!(await passPin())) return;
+  state.settings.mode = 'parent';
+  await saveSettings();
+  history.replaceState(null, '', '#/');
+  render();
+  scrollTo(0, 0);
+}
+
+/** Once, right after signing in on a device: is it a parent's device or a child's? */
+async function askModeOnce() {
+  if (state.settings.modeAsked || kidMode() || !cloud.signedIn() || state._modeAsking) return;
+  // Never on top of another sheet (the invitation's name, the install guide): it waits, and is asked on the next opening.
+  state._modeAsking = true;
+  const busy = () => state._joining || route().name === 'join' || document.querySelector('.scrim');
+  for (let i = 0; i < 10 && busy(); i += 1) await new Promise((r) => setTimeout(r, 300));
+  state._modeAsking = false;
+  if (busy() || state.settings.modeAsked || kidMode() || !cloud.signedIn()) return;
+  state.settings.modeAsked = true;
+  await saveSettings();
+  const who = await openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>מי משתמש במכשיר הזה?</h2>
+      <p class="muted">אפשר לשנות בכל רגע בהגדרות. ממסך הילדים חוזרים למסך ההורים רק עם קוד.</p>
+      <div class="who">
+        <button type="button" data-who="parent">${art('home')}<b>הורה</b><span>כל האפשרויות</span></button>
+        <button type="button" data-who="kid">${art('tablet')}<b>ילד</b><span>רק לראות ציורים</span></button>
+      </div>`;
+    body.addEventListener('click', (e) => { const b = e.target.closest('[data-who]'); if (b) close(b.dataset.who); });
+  }, { dialog: true, label: 'מי משתמש במכשיר הזה?' });
+  if (who !== 'kid') return;
+  if (!state.children.length) { await cloud.sync(); await load(); }
+  enterKid();
+}
+
+function kidTileHtml(m) {
+  const title = m.title || 'ציור';
+  const fresh = isNew(m, state.settings.kidSeen, Date.now());
+  return `<button class="kid-tile" data-kid-open="${esc(m.id)}" aria-label="${esc(title)}${fresh ? ', חדש' : ''}">
+    <span class="mat ${m.type === 'photo' || m.type === 'video' ? 'photo' : ''}"><img class="art" data-blob="${esc(m.thumb || m.image)}" alt="" loading="lazy"></span>
+    ${fresh ? '<span class="kid-new">חדש</span>' : ''}
+    ${kidClip(m) ? `<span class="kid-moves" aria-hidden="true">${ICONS.play}</span>` : ''}
+    <b>${esc(title)}</b>
+  </button>`;
+}
+
+function renderKids(r) {
+  const child = kidChild();
+  const list = kidList(state.memories, child ? child.id : null);
+  const lock = `<button class="icon-btn" data-kid-lock aria-label="מסך הורים">${ICONS.lock}</button>`;
+  if (r.name === 'kids' && r.id) {
+    const i = list.findIndex((m) => m.id === r.id);
+    if (i >= 0) return renderKidView(list, i, child);
+  }
+  const strip = state.children.length > 1 ? `<div class="kids big" role="toolbar" aria-label="של מי הציורים">
+    ${state.children.map((c) => `<button class="kid" data-kid-child="${esc(c.id)}" style="${kidVars(c)}" aria-pressed="${child && child.id === c.id}">${avatarHtml(c, 84)}${esc(c.name)}</button>`).join('')}</div>` : '';
+  return `<header class="topbar kid-top"><div class="topbar-row"><div class="wordmark">${art('pencil')}<span>ציור<i>ון</i></span></div>${lock}</div>${strip}</header>
+  <main class="kid-main" style="${kidVars(child)}">
+    <h1 class="kid-title">${child ? `הציורים של ${esc(child.name)}` : 'הציורים שלנו'}</h1>
+    ${list.length ? `<div class="kid-wall">${list.map(kidTileHtml).join('')}</div>`
+      : emptyHtml('rainbow', 'עוד אין כאן ציורים', 'כשאבא או אמא יוסיפו ציור, הוא יופיע כאן.')}
+  </main>`;
+}
+
+function renderKidView(list, i, child) {
+  const m = list[i];
+  const clip = kidClip(m);
+  const showClip = clip && (state._kidClip === m.id || !m.image);
+  const voices = kidVoices(m);
+  const stage = showClip
+    ? `<video data-blob="${esc(clip)}" ${m.image ? `data-poster="${esc(m.image)}"` : ''} autoplay loop playsinline controls></video>`
+    : `<img data-blob="${esc(m.image)}" alt="${esc(m.title || 'ציור')}">`;
+  return `<div class="kid-view" style="${kidVars(child)}">
+    <div class="kid-bar">
+      <button class="kid-back" data-kid-close>${ICONS.back}<span>כל הציורים</span></button>
+      <span class="kid-count">${i + 1} מתוך ${list.length}</span>
+    </div>
+    <div class="kid-stage" data-kid-stage>
+      ${i < list.length - 1 ? `<button class="kid-arrow next" data-kid-step="1" aria-label="הציור הבא">${ICONS.next}</button>` : ''}
+      ${stage}
+      ${i > 0 ? `<button class="kid-arrow prev" data-kid-step="-1" aria-label="הציור הקודם">${ICONS.prev}</button>` : ''}
+    </div>
+    <h1 class="kid-name">${esc(m.title || 'ציור')}</h1>
+    ${clip && m.image ? `<div class="kid-actions"><button class="kid-do" data-kid-clip>${showClip ? `${art('sheet')}<span>לציור</span>` : `${art('sparkle')}<span>להזיז את הציור</span>`}</button></div>` : ''}
+    ${voices.length ? `<div class="voices kid-voices">${voices.map((a, n) => voiceRowHtml(a.blob, a.duration, null, `להקשיב להקלטה ${n + 1}`)).join('')}</div>` : ''}
+  </div>`;
+}
+
+function kidStep(delta) {
+  const r = route();
+  const list = kidList(state.memories, kidChild() ? kidChild().id : null);
+  const i = list.findIndex((m) => m.id === r.id);
+  const next = list[i + delta];
+  if (i < 0 || !next) return;
+  kidOpen(next.id, true);
+}
+
+function kidOpen(id, replace = false) {
+  state._kidClip = null;
+  state.settings.kidSeen = markSeen(state.settings.kidSeen, id);
+  saveSettings();
+  go('kids/' + encodeURIComponent(id), { replace });
+}
+
+function kidClick(t) {
+  if (t.closest('[data-kid-lock]')) { leaveKid(); return; }
+  const who = t.closest('[data-kid-child]');
+  if (who) { state.settings.activeChild = who.dataset.kidChild; saveSettings(); render(); return; }
+  const open = t.closest('[data-kid-open]');
+  if (open) { kidOpen(open.dataset.kidOpen); return; }
+  if (t.closest('[data-kid-close]')) { state._kidClip = null; go('', { replace: true }); return; }
+  const step = t.closest('[data-kid-step]');
+  if (step) { kidStep(Number(step.dataset.kidStep)); return; }
+  if (t.closest('[data-kid-clip]')) { state._kidClip = state._kidClip === route().id ? null : route().id; render(); return; }
+  const playBtn = t.closest('[data-play]');
+  if (playBtn) togglePlay(playBtn.closest('[data-voice]'));
+}
+
+// A swipe on the picture: in Hebrew the next page is to the left, so the finger moves to the right.
+let kidTouch = null;
+APP.addEventListener('touchstart', (e) => {
+  kidTouch = kidMode() && e.touches.length === 1 && e.target.closest('.kid-view') && !e.target.closest('video, .kid-voices')
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+APP.addEventListener('touchend', (e) => {
+  if (!kidTouch) return;
+  const dx = e.changedTouches[0].clientX - kidTouch.x;
+  const dy = e.changedTouches[0].clientY - kidTouch.y;
+  kidTouch = null;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) kidStep(dx > 0 ? 1 : -1);
+}, { passive: true });
+document.addEventListener('keydown', (e) => {
+  if (!kidMode() || route().name !== 'kids' || document.querySelector('.scrim')) return;
+  if (e.key === 'ArrowLeft') kidStep(1);
+  else if (e.key === 'ArrowRight') kidStep(-1);
+});
+
 // ---------- Settings ----------
 function familyPanelHtml() {
   const u = cloud.user();
@@ -640,6 +930,7 @@ function renderSettings() {
     </div>
     ${familyPanelHtml()}
     ${routesPanelHtml()}
+    ${kidsPanelHtml()}
     ${backupPanelHtml()}
     <div class="panel">
       <div class="panel-head">${art('chest')}<div><h2>גיבוי לקובץ</h2><p>גיבוי אחרון: <b data-last-backup>${esc(last)}</b></p></div></div>
@@ -666,7 +957,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.7</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.8</p>
   </main>`;
 }
 
@@ -688,6 +979,7 @@ function bindCommon() {
 
 APP.addEventListener('click', async (e) => {
   const t = e.target;
+  if (kidMode()) { kidClick(t); return; }
   const goEl = t.closest('[data-go]');
   if (goEl) { go(goEl.dataset.go); return; }
   const backEl = t.closest('[data-nav-back]');
@@ -764,7 +1056,7 @@ APP.addEventListener('click', async (e) => {
     state.settings[routeBtn.dataset.route] = routeBtn.dataset.value;
     await saveSettings();
     // Kept with the account, so the phone and the computer follow the same choice.
-    cloud.setPrefs({ titleRoute: state.settings.titleRoute, animRoute: state.settings.animRoute }).catch(() => {});
+    savePrefs();
     render();
     return;
   }
@@ -848,6 +1140,8 @@ async function handleAction(act, r) {
     case 'cloud-signin': return openSignIn();
     case 'join-retry': return render();
     case 'install-guide': return openInstallGuide();
+    case 'kid-enter': return enterKid();
+    case 'kid-pin': return changePin();
     case 'backup-connect': {
       const btn = $('[data-act="backup-connect"]');
       if (btn) btn.disabled = true;
@@ -1839,7 +2133,7 @@ function openSignIn() {
           if (r.confirm) { close('confirm'); return; }
         } else await cloud.signIn(email, password);
         close('in');
-        loadPrefs();
+        loadPrefs().then(askModeOnce);
       } catch (ex) {
         err.textContent = ex instanceof TypeError ? 'אין חיבור לרשת.'
           : mode === 'up' ? 'לא הצלחנו לפתוח חשבון. ייתכן שהאימייל כבר רשום.'
@@ -1949,7 +2243,8 @@ async function joinFlow(code) {
   state._joining = false;
   go('', { replace: true });
   // A new family member arrived through a link in the browser: show how to keep ציורון as an app on the phone.
-  if (joined && !isInstalled()) openInstallGuide();
+  if (joined && !isInstalled()) await openInstallGuide();
+  askModeOnce();
 }
 
 // ---------- ציורון as an app on the phone ----------
@@ -2292,6 +2587,15 @@ async function checkJobs() {
   watchJobs();
 }
 
+/** What follows the account to every device: the routes and the kids-mode code (as a digest). */
+function savePrefs() {
+  if (!cloud.signedIn()) return Promise.resolve();
+  return cloud.setPrefs({
+    titleRoute: state.settings.titleRoute, animRoute: state.settings.animRoute,
+    ...(isPinRecord(state.settings.kidPin) ? { kidPin: state.settings.kidPin } : {}),
+  }).catch(() => {});
+}
+
 /** The routes chosen under "פעולות חכמות" follow the account to every device. */
 async function loadPrefs() {
   if (!cloud.signedIn()) return;
@@ -2301,6 +2605,9 @@ async function loadPrefs() {
   for (const [key, routes] of [['titleRoute', TITLE_ROUTES], ['animRoute', ANIM_ROUTES]]) {
     if (routes.some((r) => r[0] === prefs[key]) && state.settings[key] !== prefs[key]) { state.settings[key] = prefs[key]; changed = true; }
   }
+  // The kids-mode code is the same on every device of the account.
+  if (isPinRecord(prefs.kidPin) && JSON.stringify(prefs.kidPin) !== JSON.stringify(state.settings.kidPin)) { state.settings.kidPin = prefs.kidPin; changed = true; }
+  else if (!isPinRecord(prefs.kidPin) && isPinRecord(state.settings.kidPin)) savePrefs(); // a code set before signing in
   if (changed) { await saveSettings(); if (route().name === 'settings' && !document.querySelector('.scrim')) render(); }
 }
 
@@ -2316,7 +2623,7 @@ function startCloud() {
   let backupSeen = 0;
   const wake = () => {
     if (document.visibilityState !== 'visible' || !cloud.signedIn()) return;
-    loadPrefs();
+    loadPrefs().then(askModeOnce);
     cloud.sync().then(checkJobs).then(() => {
       // The backup's state: on opening, and then every 5 minutes (the settings screen asks by itself).
       if (Date.now() - backupSeen < 5 * 60000) return;
@@ -2349,4 +2656,4 @@ async function boot() {
 boot();
 
 // Exposed for tests.
-window.__tziyuron = { state, render, db, cloud, refreshBackup };
+window.__tziyuron = { state, render, db, cloud, refreshBackup, saveSettings };

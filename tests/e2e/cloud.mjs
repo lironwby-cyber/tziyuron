@@ -62,6 +62,15 @@ const signIn = async (page, email, password) => {
   await page.getByLabel('סיסמה').fill(password);
   await page.getByRole('button', { name: 'כניסה', exact: true }).click();
 };
+const who = async (page, name) => {
+  const d = page.getByRole('dialog', { name: 'מי משתמש במכשיר הזה?' });
+  await d.waitFor({ timeout: 15000 });
+  await d.getByRole('button', { name }).click();
+  await d.waitFor({ state: 'detached' });
+};
+const typePin = async (page, pin) => {
+  for (const digit of pin) await page.getByRole('dialog').getByRole('button', { name: digit, exact: true }).click();
+};
 const loaded = (page, sel) => page.waitForFunction((s) => { const el = document.querySelector(s); return el && (el.naturalWidth > 0 || el.readyState >= 1); }, sel, { timeout: 15000 });
 
 try {
@@ -90,6 +99,8 @@ try {
     await signIn(A, 'aba@example.com', 'wrong-one');
     await A.getByText('האימייל או הסיסמה לא נכונים.').waitFor();
     await signIn(A, 'aba@example.com', 'secret-aba');
+    // Once on every device, right after signing in: a parent's device or a child's?
+    await who(A, 'הורה');
     await settled(A);
     await A.getByText('הכול מסונכרן').first().waitFor();
     assert.equal(mock.tables.art_children.length, 1);
@@ -132,7 +143,9 @@ try {
     await B.getByRole('button', { name: 'אייפון' }).click();
     await B.locator('[data-steps="ios-safari"]').waitFor();
     await B.getByText('גוללים ברשימה ובוחרים "הוסף למסך הבית".').waitFor();
+    assert.equal(await B.getByRole('dialog', { name: 'מי משתמש במכשיר הזה?' }).count(), 0, 'the question waits for the guide to close');
     await B.getByRole('button', { name: 'הבנתי' }).click();
+    await who(B, 'הורה');
     await B.getByRole('button', { name: 'נועה', exact: true }).waitFor({ timeout: 15000 });
     await B.getByText('טיל לירח').first().waitFor();
     await loaded(B, '.frame img');
@@ -616,6 +629,70 @@ try {
     await A.locator('[data-backup-head]', { hasText: 'עוד לא מחובר' }).waitFor();
     assert.equal(mock.backup.connected, false);
     mock.backup.connected = true; // left connected for the rest of the run
+  });
+
+  await check('kids mode: the code follows the account, a child device opens straight on the drawings, and a forgotten code is reset with the password', async () => {
+    const pinOf = () => mock.users.get('aba@example.com').meta?.tziyuron?.kidPin;
+    await A.goto(BASE + '#/settings');
+    await A.getByRole('button', { name: 'מעבר למצב ילדים' }).click();
+    await A.getByRole('dialog', { name: 'קוד חדש להורים' }).waitFor();
+    await typePin(A, '4821');
+    await A.getByRole('dialog', { name: 'שוב, לאישור' }).waitFor();
+    await typePin(A, '4821');
+    await A.locator('.kid-title').waitFor();
+    for (let i = 0; i < 50 && !pinOf(); i += 1) await A.waitForTimeout(100);
+    const first = JSON.stringify(pinOf());
+    assert.ok(/"hash":"[0-9a-f]{64}"/.test(first) && !first.includes('4821'), 'the account keeps a digest, never the code');
+
+    // A phone that is handed to a child: signs in once, answers "ילד", and no code is asked for (it is already set).
+    const C = await device('C');
+    await C.goto(BASE + '#/settings');
+    await C.getByRole('button', { name: 'כניסה או חשבון חדש' }).click();
+    await signIn(C, 'aba@example.com', 'secret-aba');
+    await C.getByRole('dialog', { name: 'מי משתמש במכשיר הזה?' }).waitFor({ timeout: 15000 });
+    await C.waitForTimeout(400);
+    await C.screenshot({ path: join(outDir, 'cloud-24-who.png') });
+    await C.getByRole('dialog').getByRole('button', { name: 'ילד' }).click();
+    await C.locator('.kid-tile').first().waitFor({ timeout: 20000 });
+    assert.equal(await C.getByRole('dialog').count(), 0, 'no new code is asked for');
+    assert.equal(await C.locator('.fab, [data-act], [data-go], [data-mem]').count(), 0, 'nothing of the parent screens');
+
+    // The code is forgotten: a wrong code is refused, a wrong password is refused, the right one sets a new code.
+    await C.getByRole('button', { name: 'מסך הורים' }).click();
+    await typePin(C, '1111');
+    await C.getByText('הקוד לא נכון').waitFor();
+    assert.equal(await C.locator('.kid-title').count(), 1, 'still on the kids screen');
+    await C.getByRole('button', { name: 'מסך הורים' }).click();
+    await C.getByRole('button', { name: 'שכחתי את הקוד' }).click();
+    await C.getByLabel('סיסמה').fill('not-the-password');
+    await C.getByRole('button', { name: 'המשך' }).click();
+    await C.getByText('הסיסמה לא נכונה.').waitFor();
+    await C.getByLabel('סיסמה').fill('secret-aba');
+    await C.getByRole('button', { name: 'המשך' }).click();
+    await C.getByRole('dialog', { name: 'קוד חדש להורים' }).waitFor();
+    await typePin(C, '7777');
+    await C.getByRole('dialog', { name: 'שוב, לאישור' }).waitFor();
+    await typePin(C, '7777');
+    await C.getByRole('button', { name: 'נועה', exact: true }).waitFor();
+    assert.equal(await C.locator('.kid-title').count(), 0, 'back on the parent screen');
+    for (let i = 0; i < 50 && JSON.stringify(pinOf()) === first; i += 1) await C.waitForTimeout(100);
+    assert.notEqual(JSON.stringify(pinOf()), first, 'the new code reached the account');
+    await C.context().close();
+
+    // The first device is still in kids mode after reopening, and now leaves only with the new code.
+    await A.reload();
+    await A.locator('.kid-title').waitFor();
+    for (let i = 0; i < 50; i += 1) {
+      if (await A.evaluate((want) => JSON.stringify(window.__tziyuron.state.settings.kidPin) === want, JSON.stringify(pinOf()))) break;
+      await A.waitForTimeout(100);
+    }
+    await A.getByRole('button', { name: 'מסך הורים' }).click();
+    await typePin(A, '4821');
+    await A.getByText('הקוד לא נכון').waitFor();
+    await A.getByRole('button', { name: 'מסך הורים' }).click();
+    await typePin(A, '7777');
+    await A.getByRole('button', { name: 'נועה', exact: true }).waitFor();
+    assert.equal(await A.locator('.kid-title').count(), 0);
   });
 
   await check('sign-out keeps the local copy and stops sending', async () => {

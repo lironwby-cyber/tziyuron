@@ -134,4 +134,8 @@ export const ICONS = {
   compare: I('<rect x="3" y="5" width="7.5" height="14" rx="2"/><rect x="13.5" y="5" width="7.5" height="14" rx="2"/>'),
   check: I('<path d="m5 12 5 5 9-10"/>', 'stroke-width="3"'),
   plus: I('<path d="M12 5v14M5 12h14"/>', 'stroke-width="2.6"'),
+  lock: I('<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  next: I('<path d="M15 18l-6-6 6-6"/>', 'stroke-width="3"'),
+  prev: I('<path d="M9 18l6-6-6-6"/>', 'stroke-width="3"'),
+  erase: I('<path d="M21 6H9l-6 6 6 6h12a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1zM13 10l4 4M17 10l-4 4"/>'),
 };
