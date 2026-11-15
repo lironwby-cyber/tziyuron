@@ -128,6 +128,7 @@ export const ICONS = {
   share: I('<path d="M12 15V3M8 7l4-4 4 4M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>'),
   edit: I('<path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/>'),
   download: I('<path d="M12 3v12M8 11l4 4 4-4M5 21h14"/>'),
+  turn: I('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
   crop: I('<path d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14"/>'),
   show: I('<rect x="3" y="5" width="18" height="13" rx="3"/><path d="M10 9.5v4l3.5-2-3.5-2zM8 21h8"/>'),
   compare: I('<rect x="3" y="5" width="7.5" height="14" rx="2"/><rect x="13.5" y="5" width="7.5" height="14" rx="2"/>'),

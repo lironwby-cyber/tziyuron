@@ -484,6 +484,17 @@ export function jobs(ids) {
   return rest(`art_animation_jobs?select=id,status,result_path,error&id=in.(${ids.map(enc).join(',')})`);
 }
 
+// ---------- Preferences kept with the account (the same on every device) ----------
+const PREFS_KEY = 'tziyuron';
+export async function getPrefs() {
+  const u = await call('/auth/v1/user');
+  const p = u && u.user_metadata && u.user_metadata[PREFS_KEY];
+  return p && typeof p === 'object' ? p : {};
+}
+export async function setPrefs(prefs) {
+  await call('/auth/v1/user', { method: 'PUT', body: { data: { [PREFS_KEY]: prefs } } });
+}
+
 // ---------- Automatic title ----------
 /**
  * A short Hebrew title for a drawing already in the family archive.
@@ -494,5 +505,6 @@ export async function suggestTitle(memoryId, { route = 'paid', picture = null } 
   const body = { memory_id: memoryId, ...(route === 'free' ? { route, picture } : {}) };
   const data = (await call('/functions/v1/art-title', { method: 'POST', body })) || {};
   if (data.queued) return { queued: true, eta: Number(data.eta_seconds) || 60 };
-  return { title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null, reason: data.reason || '' };
+  const turn = [90, 180, 270].includes(data.turn) ? data.turn : 0;
+  return { title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null, turn, reason: data.reason || '' };
 }

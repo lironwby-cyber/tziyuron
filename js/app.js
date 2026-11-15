@@ -5,7 +5,7 @@ import { ageAt, ageLabel, formatDate, todayStr, parseDate } from './age.js';
 import { TYPES, uid, filterMemories, groupByAge, compareMemories, backupPaths, safeName, memoryBlobIds } from './model.js';
 import { createZip, readZip } from './zip.js';
 import { esc, $, $$, toast, openSheet, confirmDialog, pickFiles, downloadBlob, formatDuration, kidStyle, art, ANIMALS, KID_COLORS, ICONS } from './ui.js';
-import { decode, detect, detectAll, fullCorners, processToCanvas, makeThumb, encodeJpeg, canvasToBlob, videoFrame, mediaDuration, drawToCanvas } from './scan.js';
+import { decode, detect, detectAll, fullCorners, processToCanvas, makeThumb, encodeJpeg, canvasToBlob, videoFrame, mediaDuration, drawToCanvas, turnCanvas } from './scan.js';
 import { openCamera, cameraSupported } from './camera.js';
 import { openCropEditor } from './crop.js';
 import { recordAudio } from './recorder.js';
@@ -373,6 +373,7 @@ function renderMemory(id) {
       ${!m.title && m.image && cloud.signedIn() && (m.type === 'artwork' || m.type === 'photo') && !(state._naming && state._naming.has(m.id)) ? `<button class="btn" data-act="suggest-title">${ICONS.edit}הצעת שם</button>` : ''}
       ${m.image || m.media ? `<button class="btn" data-act="share">${ICONS.share}שיתוף</button>
       <button class="btn" data-act="download">${ICONS.download}הורדה</button>` : ''}
+      ${m.image && (m.type === 'artwork' || m.type === 'photo') ? `<button class="btn" data-act="rotate">${ICONS.turn}סיבוב</button>` : ''}
       ${m.image && m.original && m.type === 'artwork' ? `<button class="btn" data-act="recrop">${ICONS.crop}חיתוך מחדש</button>` : ''}
       <button class="btn danger" data-act="delete">${ICONS.trash}מחיקה</button>
     </div>
@@ -407,6 +408,7 @@ function renderReview() {
           <input class="input" placeholder="${cloud.signedIn() ? 'שם הציור (אם ריק, יוצע שם לבד)' : 'שם הציור (לא חובה)'}" value="${esc(it.title)}" data-title="${idx}" aria-label="שם הציור ${idx + 1}">
           ${!many ? `<textarea class="input" placeholder="מה הילד סיפר על הציור? (לא חובה)" data-caption="${idx}" aria-label="כיתוב" style="min-height:60px">${esc(it.caption || '')}</textarea>` : ''}
           <div class="btn-row">
+            <button class="btn" data-turn="${idx}" ${it.status !== 'ready' ? 'disabled' : ''}>${ICONS.turn}סיבוב</button>
             <button class="btn" data-crop="${idx}" ${it.status !== 'ready' ? 'disabled' : ''}>${ICONS.crop}תיקון חיתוך</button>
             <button class="btn ghost" data-remove="${idx}">הסרה</button>
           </div>
@@ -525,7 +527,7 @@ function routesPanelHtml() {
     </div>`;
   };
   return `<div class="panel">
-    <div class="panel-head">${art('sparkle')}<div><h2>פעולות חכמות</h2><p>מסלול חינם ליד כל פעולה בתשלום</p></div></div>
+    <div class="panel-head">${art('sparkle')}<div><h2>פעולות חכמות</h2><p>מסלול חינם ליד כל פעולה בתשלום. הבחירה נשמרת בחשבון, בכל המכשירים.</p></div></div>
     ${row('שם אוטומטי לציור', 'titleRoute', TITLE_ROUTES)}
     ${row('הנפשה', 'animRoute', ANIM_ROUTES)}
   </div>`;
@@ -567,7 +569,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.3</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.4</p>
   </main>`;
 }
 
@@ -622,6 +624,17 @@ APP.addEventListener('click', async (e) => {
   const r = route();
   // Review screen
   if (r.name === 'review' && state.review) {
+    const turn = t.closest('[data-turn]');
+    if (turn) {
+      const it = state.review.items[Number(turn.dataset.turn)];
+      if (it && it.status === 'ready') {
+        it.rot = ((it.rot || 0) + 90) % 360;
+        it.status = 'processing';
+        await render();
+        await processQueue();
+      }
+      return;
+    }
     const crop = t.closest('[data-crop]');
     if (crop) { await recropItem(Number(crop.dataset.crop)); return; }
     const rem = t.closest('[data-remove]');
@@ -653,6 +666,8 @@ APP.addEventListener('click', async (e) => {
   if (routeBtn) {
     state.settings[routeBtn.dataset.route] = routeBtn.dataset.value;
     await saveSettings();
+    // Kept with the account, so the phone and the computer follow the same choice.
+    cloud.setPrefs({ titleRoute: state.settings.titleRoute, animRoute: state.settings.animRoute }).catch(() => {});
     render();
     return;
   }
@@ -788,6 +803,12 @@ async function handleAction(act, r) {
         return hydrate();
       }
       case 'recrop': return recropMemory(m);
+      case 'rotate': {
+        if (state._turning) return;
+        state._turning = true;
+        try { await rotateMemory(m); } finally { state._turning = false; }
+        return render();
+      }
       case 'suggest-title': {
         const got = await nameDrawings([m.id], { manual: true });
         if (!got) toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000);
@@ -905,7 +926,7 @@ async function processItem(it) {
       // Photos are kept as they are: no crop and no cleaning.
       it.corners = fullCorners(src);
       it.found = true;
-      it.processed = await encodeJpeg(src, 2400, 0.9);
+      it.processed = it.rot ? await canvasToBlob(turnCanvas(drawToCanvas(src, 2400).canvas, it.rot), 'image/jpeg', 0.9) : await encodeJpeg(src, 2400, 0.9);
     } else {
       // A photo from the gallery may hold several drawings: each one becomes its own item.
       if (!it.corners && !it.hint && !it.splitDone && state.review) {
@@ -926,7 +947,7 @@ async function processItem(it) {
       it.detected = it.detected || (det.found ? det.corners : null);
       // The live camera outline is only a fallback: the full frame is detected again, more precisely.
       if (!it.corners) { it.corners = det.found ? det.corners : it.hint || fullCorners(src); it.found = det.found || !!it.hint; }
-      const canvas = processToCanvas(src, it.corners, { clean: it.clean });
+      const canvas = turnCanvas(processToCanvas(src, it.corners, { clean: it.clean }), it.rot || 0);
       it.processed = await canvasToBlob(canvas, 'image/jpeg', 0.9);
     }
     if (src.close) src.close();
@@ -990,7 +1011,7 @@ async function saveReview() {
     const m = {
       id, childId, type: it.mode === 'photo' ? 'photo' : 'artwork', title: it.title.trim(), caption: (it.caption || '').trim(), date,
       createdAt: now + order++, updatedAt: now, image: bImage.id, original: bOrig.id, thumb: bThumb.id,
-      corners: it.corners, clean: it.clean, attachments: [],
+      corners: it.corners, clean: it.clean, rot: it.rot || 0, ...(it.rot ? { rotUser: true } : {}), attachments: [],
     };
     ops.push(['blobs', bImage], ['blobs', bOrig], ['blobs', bThumb], ['memories', m]);
     created.push(m);
@@ -1020,7 +1041,7 @@ async function recropMemory(m) {
   URL.revokeObjectURL(url);
   if (!res) { if (src.close) src.close(); return; }
   toast('מעבד…', 1500);
-  const canvas = processToCanvas(src, res.corners, { clean: res.clean });
+  const canvas = turnCanvas(processToCanvas(src, res.corners, { clean: res.clean }), m.rot || 0);
   if (src.close) src.close();
   const processed = await canvasToBlob(canvas, 'image/jpeg', 0.9);
   const thumb = await makeThumb(canvas);
@@ -1033,6 +1054,43 @@ async function recropMemory(m) {
   old.forEach(forgetUrl);
   Object.assign(m, updated);
   render();
+}
+
+/**
+ * Turn a saved drawing clockwise by a quarter turn (or by `by` degrees). A scanned drawing is rebuilt from
+ * its original, so repeated turns never wear the picture down; a plain photo is turned as it is.
+ * auto: the turn was suggested by the naming step, and is skipped once someone turned the drawing by hand.
+ */
+async function rotateMemory(m, by = 90, { auto = false } = {}) {
+  by = ((Math.round(by / 90) % 4) + 4) % 4 * 90;
+  if (!m || !m.image || !by || (auto && m.rotUser)) return false;
+  const rot = ((m.rot || 0) + by) % 360;
+  let canvas = null;
+  const origRec = m.type === 'artwork' && m.original && m.corners ? await cloud.ensureBlob(m.original) : null;
+  if (origRec && origRec.blob) {
+    const src = await decode(origRec.blob);
+    canvas = turnCanvas(processToCanvas(src, m.corners, { clean: m.clean !== false }), rot);
+    if (src.close) src.close();
+  } else {
+    const rec = await cloud.ensureBlob(m.image);
+    if (!rec || !rec.blob) return false;
+    const src = await decode(rec.blob);
+    canvas = turnCanvas(drawToCanvas(src, 2400).canvas, by);
+    if (src.close) src.close();
+  }
+  const processed = await canvasToBlob(canvas, 'image/jpeg', 0.9);
+  const thumb = await makeThumb(canvas);
+  const bImage = blobRecord(processed, 'image', { memoryId: m.id });
+  const bThumb = blobRecord(thumb, 'thumb', { memoryId: m.id });
+  const old = [m.image, m.thumb];
+  const { turn, ...rest } = m;
+  const updated = { ...rest, image: bImage.id, thumb: bThumb.id, rot, ...(auto ? {} : { rotUser: true }), updatedAt: Date.now() };
+  await db.putMany([['blobs', bImage], ['blobs', bThumb], ['memories', updated]]);
+  await db.delMany(old.filter(Boolean).map((id) => ['blobs', id]));
+  old.forEach(forgetUrl);
+  if (turn !== undefined) delete m.turn;
+  Object.assign(m, updated);
+  return true;
 }
 
 // ---------- Other memory types ----------
@@ -1577,6 +1635,7 @@ function openSignIn() {
           if (r.confirm) { close('confirm'); return; }
         } else await cloud.signIn(email, password);
         close('in');
+        loadPrefs();
       } catch (ex) {
         err.textContent = ex instanceof TypeError ? 'אין חיבור לרשת.'
           : mode === 'up' ? 'לא הצלחנו לפתוח חשבון. ייתכן שהאימייל כבר רשום.'
@@ -1716,6 +1775,7 @@ async function nameDrawings(ids, { manual = false } = {}) {
   refresh();
   let named = 0;
   const waiting = [];
+  const turned = () => toast('סובבתי את הציור שיעמוד ישר. אפשר לתקן בכפתור "סיבוב".', 5000);
   try {
     await cloud.sync(); // the picture has to be in the family archive before it can be looked at
     for (const id of ids) {
@@ -1736,6 +1796,7 @@ async function nameDrawings(ids, { manual = false } = {}) {
           Object.assign(m, updated);
           named++;
         }
+        if (res.turn && m && await rotateMemory(m, res.turn, { auto: true })) turned();
       }
       refresh();
     }
@@ -1762,6 +1823,11 @@ function awaitNames() {
     let changed = false;
     for (const [id, at] of pending) {
       const m = memoryById(id);
+      if (m && m.title && m.turn) {
+        // The task also said which way is up. Only the device that asked applies it, once.
+        if (await rotateMemory(m, m.turn, { auto: true })) toast('סובבתי את הציור שיעמוד ישר. אפשר לתקן בכפתור "סיבוב".', 5000);
+        else if (m.turn !== undefined) { const { turn, ...rest } = m; const u = { ...rest, updatedAt: Date.now() }; await db.put('memories', u); delete m.turn; Object.assign(m, u); }
+      }
       if (!m || m.title || Date.now() - at > NAME_WAIT_MS) { state._naming.delete(id); changed = true; }
     }
     if (changed && !document.querySelector('.scrim') && !state.review) render();
@@ -1850,6 +1916,18 @@ async function checkJobs() {
   watchJobs();
 }
 
+/** The routes chosen under "פעולות חכמות" follow the account to every device. */
+async function loadPrefs() {
+  if (!cloud.signedIn()) return;
+  let prefs = {};
+  try { prefs = await cloud.getPrefs(); } catch { return; }
+  let changed = false;
+  for (const [key, routes] of [['titleRoute', TITLE_ROUTES], ['animRoute', ANIM_ROUTES]]) {
+    if (routes.some((r) => r[0] === prefs[key]) && state.settings[key] !== prefs[key]) { state.settings[key] = prefs[key]; changed = true; }
+  }
+  if (changed) { await saveSettings(); if (route().name === 'settings' && !document.querySelector('.scrim')) render(); }
+}
+
 function startCloud() {
   cloud.onStatus((st) => {
     const line = $('[data-sync-line]');
@@ -1859,7 +1937,7 @@ function startCloud() {
     const busy = document.querySelector('.scrim') || state.review || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
     if (!busy) render().then(watchJobs);
   });
-  const wake = () => { if (document.visibilityState === 'visible' && cloud.signedIn()) cloud.sync().then(checkJobs); };
+  const wake = () => { if (document.visibilityState === 'visible' && cloud.signedIn()) { loadPrefs(); cloud.sync().then(checkJobs); } };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);
   setInterval(wake, 60000);

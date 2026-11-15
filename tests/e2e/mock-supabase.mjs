@@ -11,6 +11,7 @@ export function startMock(port) {
   const titles = []; // what the title function answers next (null = not recognised)
   const titleCalls = [];
   const freePictures = [];
+  const turns = [];
 
   const isMember = (uid, childId) => t.art_child_members.some((m) => m.child_id === childId && m.user_id === uid);
   const childOf = { art_children: (r) => r.id, art_child_members: (r) => r.child_id, art_memories: (r) => r.child_id, art_invites: (r) => r.child_id, art_animation_jobs: (r) => r.child_id };
@@ -82,6 +83,11 @@ export function startMock(port) {
       const auth = (req.headers.authorization || '').replace('Bearer tok-', '');
       const uid = [...users.values()].some((u) => u.id === auth) ? auth : null;
       if (!uid) return send(res, 401, { message: 'JWT missing' });
+      if (path === '/auth/v1/user') {
+        const me = [...users.values()].find((u) => u.id === uid);
+        if (req.method === 'PUT') me.meta = { ...(me.meta || {}), ...(json().data || {}) };
+        return send(res, 200, { id: uid, user_metadata: me.meta || {} });
+      }
 
       if (path === '/rest/v1/rpc/art_accept_invite') {
         const b = json();
@@ -154,10 +160,11 @@ export function startMock(port) {
           // The scheduled task: a moment later the title is written on the server.
           freePictures.push(b.picture);
           const title = titles.length ? titles.shift() : null;
-          setTimeout(() => { if (title && !m.title) Object.assign(m, { title, details: { ...m.details, autoTitle: true }, updated_at: now() + '-task' }); }, 1500);
+          const turn = turns.length ? turns.shift() : 0;
+          setTimeout(() => { if (title && !m.title) Object.assign(m, { title, details: { ...m.details, autoTitle: true, ...(turn ? { turn } : {}) }, updated_at: now() + '-task' }); }, 1500);
           return send(res, 200, { queued: true, eta_seconds: 60 });
         }
-        return send(res, 200, { title: titles.length ? titles.shift() : null });
+        return send(res, 200, { title: titles.length ? titles.shift() : null, turn: turns.length ? turns.shift() : 0 });
       }
 
       const BUCKET = '/storage/v1/object/';
@@ -191,5 +198,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, users })));
 }

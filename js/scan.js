@@ -36,6 +36,21 @@ export function drawToCanvas(src, maxSide) {
   return { canvas: c, ctx, scale: f };
 }
 
+/** The canvas turned clockwise by 0, 90, 180 or 270 degrees (a new canvas, or the same one for 0). */
+export function turnCanvas(canvas, degrees) {
+  const rot = ((Math.round(degrees / 90) % 4) + 4) % 4;
+  if (!rot) return canvas;
+  const c = document.createElement('canvas');
+  const swap = rot % 2 === 1;
+  c.width = swap ? canvas.height : canvas.width;
+  c.height = swap ? canvas.width : canvas.height;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width / 2, c.height / 2);
+  ctx.rotate(rot * Math.PI / 2);
+  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  return c;
+}
+
 export function canvasToBlob(canvas, type = 'image/jpeg', quality = 0.9) {
   return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('encode failed'))), type, quality));
 }

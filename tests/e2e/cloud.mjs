@@ -291,6 +291,62 @@ try {
     assert.equal(mock.titleCalls.length, 3);
   });
 
+  const mainSize = () => A.locator('img[data-main]').evaluate((i) => (i.complete && i.naturalWidth ? `${i.naturalWidth}x${i.naturalHeight}` : ''));
+  const sizeChanges = async (from) => {
+    for (let i = 0; i < 100; i++) { const now = await mainSize(); if (now && now !== from) return now; await A.waitForTimeout(100); }
+    throw new Error('the picture did not change');
+  };
+  const flip = (size) => size.split('x').reverse().join('x');
+
+  await check('a saved drawing can be turned a quarter turn, and the turn reaches the archive', async () => {
+    const before = await sizeChanges('');
+    await A.getByRole('button', { name: 'סיבוב' }).click();
+    assert.equal(await sizeChanges(before), flip(before));
+    await settled(A);
+    const row = mock.tables.art_memories.at(-1);
+    assert.equal(row.details.rot, 90);
+    assert.equal(row.details.rotUser, true);
+    await A.getByRole('button', { name: 'סיבוב' }).click();
+    assert.equal(await sizeChanges(flip(before)), before);
+    await settled(A);
+    assert.equal(mock.tables.art_memories.at(-1).details.rot, 180);
+    assert.equal(mock.files.size, new Set(mock.files.keys()).size);
+  });
+
+  await check('the save screen has a turn button too', async () => {
+    await A.goto(BASE);
+    await A.getByRole('button', { name: 'הוספה' }).click();
+    const fc = A.waitForEvent('filechooser');
+    await A.getByText('ציורים מהגלריה').click();
+    await (await fc).setFiles(join(fx, 'scene.jpg'));
+    const preview = A.getByRole('img', { name: 'תוצאה 1' });
+    await preview.waitFor({ timeout: 20000 });
+    const size = () => preview.evaluate((i) => (i.complete && i.naturalWidth ? `${i.naturalWidth}x${i.naturalHeight}` : ''));
+    let before = ''; for (let i = 0; i < 50 && !before; i++) { before = await size(); await A.waitForTimeout(100); }
+    await A.getByRole('button', { name: 'סיבוב' }).click();
+    let after = before; for (let i = 0; i < 100 && (after === before || !after); i++) { await A.waitForTimeout(100); after = await preview.evaluate((i) => (i.complete && i.naturalWidth ? `${i.naturalWidth}x${i.naturalHeight}` : '')).catch(() => ''); }
+    assert.equal(after, flip(before));
+    await A.screenshot({ path: join(outDir, 'cloud-08-turn.png') });
+    await A.getByLabel('שם הציור 1').fill('ציור מסובב');
+    await A.getByRole('button', { name: 'שמירה' }).click();
+    await A.getByRole('heading', { name: 'ציור מסובב' }).waitFor();
+    assert.equal(await sizeChanges(''), after);
+    await settled(A);
+    assert.equal(mock.tables.art_memories.at(-1).details.rot, 90);
+  });
+
+  await check('the naming step also says which way is up, and the drawing is turned by itself', async () => {
+    mock.titles.push('פרפר צהוב');
+    mock.turns.push(90);
+    await importDrawing('');
+    await A.getByRole('heading', { name: 'פרפר צהוב' }).waitFor({ timeout: 20000 });
+    await A.getByText('סובבתי את הציור').waitFor({ timeout: 20000 });
+    await settled(A);
+    const row = mock.tables.art_memories.at(-1);
+    assert.equal(row.details.rot, 90);
+    assert.equal(row.details.rotUser, undefined);
+  });
+
   await check('settings: every paid action has a free route with its price and waiting time', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('heading', { name: 'פעולות חכמות' }).waitFor();
@@ -299,12 +355,17 @@ try {
     await A.getByText('השם מוכן בעוד כדקה').waitFor();
     await A.getByRole('group', { name: 'הנפשה' }).getByRole('button', { name: 'במכשיר' }).click();
     await A.getByText('חינם ומיידי').waitFor();
+    // The choice is kept with the account, so every device follows it.
+    for (let i = 0; i < 50 && !([...mock.users.values()].some((u) => u.meta && u.meta.tziyuron && u.meta.tziyuron.animRoute === 'local')); i++) await A.waitForTimeout(100);
+    const meta = [...mock.users.values()].map((u) => u.meta && u.meta.tziyuron).find(Boolean);
+    assert.deepEqual(meta, { titleRoute: 'free', animRoute: 'local' });
     await A.locator('.panel', { hasText: 'פעולות חכמות' }).screenshot({ path: join(outDir, 'cloud-07-routes.png') });
     assert.equal(await A.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth) <= 0, true, 'no sideways overflow');
   });
 
   await check('free naming: the app says when the name will be ready, and it arrives by itself', async () => {
     mock.titles.push('בית עם גג אדום');
+    mock.turns.push(180);
     await importDrawing('');
     await A.getByText('השם יהיה מוכן בעוד כדקה').first().waitFor({ timeout: 20000 });
     await A.locator('[data-naming]').waitFor();
@@ -313,6 +374,11 @@ try {
     const pic = mock.freePictures.at(-1);
     assert.ok(pic.length > 500 && pic.length < 40000, `small picture is ${pic.length} characters`);
     assert.equal(Buffer.from(pic, 'base64').subarray(0, 2).toString('hex'), 'ffd8', 'a JPEG');
+    await A.getByText('סובבתי את הציור').waitFor({ timeout: 30000 });
+    await settled(A);
+    const row = mock.tables.art_memories.at(-1);
+    assert.equal(row.details.rot, 180);
+    assert.equal(row.details.turn, undefined, 'the pending turn is cleared once applied');
   });
 
   await check('animation route "on the device": no sheet and no paid job', async () => {
