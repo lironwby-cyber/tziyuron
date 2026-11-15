@@ -1,0 +1,13 @@
+{
+  "name": "tziyuron",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "description": "ציורון: שמירת ציורי ילדים. PWA בעברית, עם ארכיון משפחתי משותף.",
+  "scripts": {
+    "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "node tests/e2e/run.mjs",
+    "serve": "python3 -m http.server 8080",
+    "test:cloud": "node tests/e2e/cloud.mjs"
+  }
+}

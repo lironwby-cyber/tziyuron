@@ -1,0 +1,5 @@
+node_modules/
+tests/fixtures/scene.y4m
+tests/e2e/out/
+tests/demo/out/
+tests/demo/photos/
