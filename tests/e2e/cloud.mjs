@@ -695,6 +695,143 @@ try {
     assert.equal(await A.locator('.kid-title').count(), 0);
   });
 
+  await check('share the whole family: hidden until the server has it', async () => {
+    await A.goto(BASE + '#/settings');
+    await A.getByRole('button', { name: 'סנכרון עכשיו' }).waitFor();
+    await A.waitForTimeout(800);
+    assert.equal(await A.getByRole('button', { name: 'שיתוף כל המשפחה' }).count(), 0);
+    assert.deepEqual(errors, []);
+  });
+
+  let famCode;
+  await check('share the whole family: a typed contact, one invitation to all the children, and a WhatsApp message that is ready', async () => {
+    mock.flags.familyInvites = true;
+    // A second child, so that "all the children" means something.
+    await A.goto(BASE + '#/child/new');
+    await A.getByLabel('שם', { exact: true }).fill('יובל');
+    await A.getByLabel('תאריך לידה').fill('2022-05-01');
+    await A.getByRole('button', { name: 'שמירה' }).click();
+    for (let i = 0; i < 100 && mock.tables.art_children.length < 2; i += 1) await A.waitForTimeout(100);
+    assert.equal(mock.tables.art_children.length, 2);
+    await settled(A);
+    await A.goto(BASE + '#/settings');
+    await A.getByRole('button', { name: 'שיתוף כל המשפחה' }).click();
+    const sheet = A.getByRole('dialog', { name: 'שיתוף כל המשפחה' });
+    await sheet.getByText('כל הילדים יחד: נועה ויובל').waitFor();
+    // A desktop browser has no contact picker: the screen says so, and the name and number are typed.
+    assert.equal(await sheet.getByRole('button', { name: 'בחירה מאנשי הקשר' }).count(), 0);
+    await sheet.getByText('הדפדפן הזה לא מאפשר לבחור מאנשי הקשר').waitFor();
+    await sheet.getByRole('button', { name: 'הכנת ההודעה' }).click();
+    await sheet.getByText('צריך שם, כדי שההודעה תהיה אישית.').waitFor();
+    await sheet.getByLabel('שם', { exact: true }).fill('דודה מיכל');
+    await sheet.getByLabel('מספר טלפון').fill('12ab');
+    await sheet.getByRole('button', { name: 'הכנת ההודעה' }).click();
+    await sheet.getByText('המספר לא נראה כמו מספר טלפון').waitFor();
+    assert.equal(mock.familyInvites.length, 0, 'nothing is made before the form is right');
+    await sheet.getByLabel('מספר טלפון').fill('054-123 4567');
+    assert.equal(await sheet.getByText('המספר לא נראה כמו מספר טלפון').count(), 0, 'the remark goes away when the number is corrected');
+    await A.waitForTimeout(3200);
+    await A.screenshot({ path: join(outDir, 'cloud-25-share-form.png') });
+    await sheet.getByRole('button', { name: 'הכנת ההודעה' }).click();
+    const ready = A.getByRole('dialog', { name: 'ההודעה לדודה מיכל מוכנה' });
+    await ready.waitFor();
+    assert.equal(mock.familyInvites.length, 1);
+    famCode = mock.familyInvites[0].code;
+    assert.ok(/^F[0-9a-f]{32}$/.test(famCode));
+    assert.ok(!JSON.stringify(mock.familyInvites).includes('541234567'), 'the phone number does not reach the server');
+    const link = `${BASE}#/join/${famCode}`;
+    const text = await ready.locator('[data-invite-text]').innerText();
+    assert.ok(text.startsWith('היי דודה מיכל,') && text.includes('של נועה ויובל.') && text.includes(link), text);
+    assert.ok(text.includes('באייפון: כפתור השיתוף ואז "הוספה למסך הבית".') && text.includes('באנדרואיד: תפריט כרום ואז "התקנת אפליקציה".'));
+    const href = new URL(await ready.getByRole('link', { name: 'שליחה בוואטסאפ' }).getAttribute('href'));
+    assert.equal(href.origin + href.pathname, 'https://wa.me/972541234567');
+    assert.equal(href.searchParams.get('text').replace(/\s+/g, ' '), text.replace(/\s+/g, ' '), 'WhatsApp gets the message that is shown');
+    await A.waitForTimeout(300);
+    await A.screenshot({ path: join(outDir, 'cloud-26-share-message.png') });
+    // One press opens WhatsApp on that number (the address is answered here, nothing leaves the test).
+    await A.context().route('https://wa.me/**', (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<title>wa</title>' }));
+    const [wa] = await Promise.all([A.context().waitForEvent('page'), ready.getByRole('link', { name: 'שליחה בוואטסאפ' }).click()]);
+    await wa.waitForLoadState();
+    assert.ok(wa.url().startsWith('https://wa.me/972541234567?text='), wa.url().slice(0, 60));
+    await wa.close();
+    await ready.getByRole('button', { name: 'סגירה' }).click();
+    const row = A.locator(`[data-invite-row="${famCode}"]`);
+    await row.getByText('דודה מיכל').waitFor();
+    await row.getByText('מחכים').waitFor();
+    await A.locator('[data-invites]').scrollIntoViewIfNeeded();
+  });
+
+  await check('share the whole family: the guest joins once and sees all the children; the link does not work again', async () => {
+    await api('/__test/user', { email: 'doda@example.com', password: 'secret-doda' });
+    const D = await device('D');
+    await D.goto(`${BASE}#/join/${famCode}`);
+    await signIn(D, 'doda@example.com', 'secret-doda');
+    await D.getByLabel('שם', { exact: true }).fill('מיכל');
+    await D.getByRole('button', { name: 'הצטרפות' }).click();
+    await D.getByRole('heading', { name: 'ציורון כאפליקציה בטלפון' }).waitFor({ timeout: 15000 });
+    await D.getByRole('button', { name: 'הבנתי' }).click();
+    await who(D, 'הורה');
+    await D.getByRole('button', { name: 'נועה', exact: true }).waitFor({ timeout: 15000 });
+    await D.getByRole('button', { name: 'יובל', exact: true }).waitFor();
+    const doda = mock.users.get('doda@example.com').id;
+    assert.equal(mock.tables.art_child_members.filter((m) => m.user_id === doda && m.display_name === 'מיכל').length, 2, 'attached to both children under the typed name');
+    await D.waitForTimeout(400);
+    await D.screenshot({ path: join(outDir, 'cloud-27-share-joined.png') });
+    // The same link again: by the same person, and by someone else.
+    assert.equal(await D.evaluate((c) => window.__tziyuron.cloud.acceptInvite(c, 'x').then(() => 'ok', (e) => e.message), famCode), 'invite is not valid');
+    await B.goto(`${BASE}#/join/${famCode}`);
+    await B.getByLabel('שם', { exact: true }).fill('סבתא');
+    await B.getByRole('button', { name: 'הצטרפות' }).click();
+    await B.getByText('ההזמנה לא תקפה או שכבר נעשה בה שימוש').waitFor();
+    const savta = mock.users.get('savta@example.com').id;
+    assert.equal(mock.tables.art_child_members.filter((m) => m.user_id === savta).length, 0, 'a used link attaches nobody');
+    // The inviter's list now says who joined, and the guest (a family member like any other) sees the list too.
+    await A.reload();
+    await A.locator(`[data-invite-row="${famCode}"]`).getByText('כבר איתנו').waitFor();
+    assert.equal(await A.locator(`[data-invite-row="${famCode}"] button`).count(), 0, 'nothing to cancel after joining');
+    await D.goto(BASE + '#/settings');
+    await D.locator(`[data-invite-row="${famCode}"]`).getByText('דודה מיכל').waitFor();
+    await D.context().close();
+  });
+
+  await check('share the whole family: a contact picked from the phone fills the form; an unused invitation can be sent again and cancelled', async () => {
+    // A phone with a contact picker (Android Chrome): the picker is answered here.
+    await A.evaluate(() => {
+      Object.defineProperty(navigator, 'contacts', { configurable: true, value: { select: async () => [{ name: ['סבא יוסי'], tel: ['+972 50-765 4321'] }] } });
+      return window.__tziyuron.render();
+    });
+    await A.getByRole('button', { name: 'שיתוף כל המשפחה' }).click();
+    const sheet = A.getByRole('dialog', { name: 'שיתוף כל המשפחה' });
+    await sheet.getByRole('button', { name: 'בחירה מאנשי הקשר' }).click();
+    await A.waitForFunction(() => document.querySelector('#fs-name').value === 'סבא יוסי');
+    assert.equal(await sheet.getByLabel('מספר טלפון').inputValue(), '+972 50-765 4321');
+    await sheet.getByRole('button', { name: 'הכנת ההודעה' }).click();
+    const ready = A.getByRole('dialog', { name: 'ההודעה לסבא יוסי מוכנה' });
+    await ready.waitFor();
+    assert.ok((await ready.getByRole('link', { name: 'שליחה בוואטסאפ' }).getAttribute('href')).startsWith('https://wa.me/972507654321?text='));
+    await ready.getByRole('button', { name: 'סגירה' }).click();
+    const code = mock.familyInvites.find((i) => i.invitee_name === 'סבא יוסי').code;
+    const row = A.locator(`[data-invite-row="${code}"]`);
+    await row.waitFor();
+    await A.locator('[data-invites]').evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    await A.waitForTimeout(300);
+    await A.screenshot({ path: join(outDir, 'cloud-28-share-list.png') });
+    // "שליחה שוב" builds the same message for the same number, kept on this phone only.
+    await row.getByRole('button', { name: 'שליחה שוב' }).click();
+    const again = A.getByRole('dialog', { name: 'ההודעה לסבא יוסי מוכנה' });
+    assert.ok((await again.getByRole('link', { name: 'שליחה בוואטסאפ' }).getAttribute('href')).startsWith('https://wa.me/972507654321?text='));
+    assert.ok((await again.locator('[data-invite-text]').innerText()).includes(`#/join/${code}`));
+    await again.getByRole('button', { name: 'סגירה' }).click();
+    // Cancelled: gone from the list, and the link is dead.
+    await row.getByRole('button', { name: 'ביטול' }).click();
+    await A.getByRole('dialog').getByRole('button', { name: 'ביטול ההזמנה' }).click();
+    await row.waitFor({ state: 'detached' });
+    assert.equal(mock.familyInvites.some((i) => i.code === code), false);
+    assert.equal(await B.evaluate((c) => window.__tziyuron.cloud.acceptInvite(c, 'x').then(() => 'ok', (e) => e.message), code), 'invite is not valid');
+    assert.equal(await A.evaluate((c) => (window.__tziyuron.state.settings.invitePhones || {})[c] || null, code), null, 'the number is forgotten with the invitation');
+    await A.evaluate(() => { delete navigator.contacts; });
+  });
+
   await check('sign-out keeps the local copy and stops sending', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('button', { name: 'יציאה', exact: true }).click();

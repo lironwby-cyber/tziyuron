@@ -12,6 +12,7 @@ import { recordAudio } from './recorder.js';
 import { openAnimator } from './anim.js';
 import * as cloud from './cloud.js';
 import { suggestFromTitle, cleanMotions, turnMotions } from './motion.js';
+import { waPhone, nameList, inviteMessage, waLink, inviteState, pickedContact } from './share.js';
 import { validPin, makePin, checkPin, isPinRecord, lockWait, kidList, isNew, markSeen, kidClip, kidVoices } from './kids.js';
 
 const APP = document.getElementById('app');
@@ -811,12 +812,137 @@ function familyPanelHtml() {
   return `<div class="panel">
     <div class="panel-head">${art('balloon')}<div><h2>שיתוף משפחתי</h2><p dir="ltr" style="text-align:right">${esc(u.email || '')}</p></div></div>
     <p class="small" data-sync-line>${esc(line)}</p>
-    <p class="small muted">לצירוף בן משפחה לילד: לוחצים "משפחה" ליד שם הילד ושולחים את הקישור.</p>
+    <p class="small muted">${Array.isArray(state._invites) ? '"שיתוף כל המשפחה" מצרף אדם לכל הילדים יחד, עם הודעת וואטסאפ מוכנה. לצירוף לילד אחד בלבד: "משפחה" ליד שם הילד.' : 'לצירוף בן משפחה לילד: לוחצים "משפחה" ליד שם הילד ושולחים את הקישור.'}</p>
     <div class="btn-row">
+      ${Array.isArray(state._invites) ? `<button class="btn sunny" data-act="family-share" ${state.children.length ? '' : 'disabled'}>שיתוף כל המשפחה</button>` : ''}
       <button class="btn" data-act="cloud-sync">סנכרון עכשיו</button>
       <button class="btn" data-act="cloud-signout">יציאה</button>
     </div>
+    ${invitesListHtml()}
   </div>`;
+}
+
+// ---------- One invitation for all the children, sent through WhatsApp ----------
+const inviteLink = (code) => `${location.origin}${location.pathname}#/join/${code}`;
+const inviteText = (name, code) => inviteMessage({ name, kids: state.children.map((c) => c.name), link: inviteLink(code) });
+
+/** Who was invited, who joined, and the invitations that can still be cancelled. */
+function invitesListHtml() {
+  const list = state._invites;
+  if (!Array.isArray(list) || !list.length) return '';
+  const now = Date.now();
+  return `<div class="invites" data-invites><h3>מי הוזמן</h3>
+    ${list.map((r) => {
+      const st = inviteState(r, now);
+      const line = st === 'joined' ? `מאז ${formatDate(todayStr(new Date(r.used_at)))}`
+        : st === 'expired' ? 'ההזמנה פגה ולא נוצלה'
+        : `הקישור בתוקף עד ${formatDate(todayStr(new Date(r.expires_at)))}`;
+      return `<div class="list-row" data-invite-row="${esc(r.code)}"><div class="grow"><b>${esc(r.invitee_name)}</b> <span class="chip sub inv-${st}">${st === 'joined' ? 'כבר איתנו' : st === 'expired' ? 'פג תוקף' : 'מחכים'}</span>
+        <div class="small muted">${esc(line)}</div></div>
+        ${st === 'joined' ? '' : `<div class="row-actions">${st === 'open' ? `<button class="btn" data-invite-again="${esc(r.code)}">שליחה שוב</button>` : ''}<button class="btn danger" data-invite-cancel="${esc(r.code)}">${st === 'open' ? 'ביטול' : 'הסרה'}</button></div>`}</div>`;
+    }).join('')}</div>`;
+}
+
+/** Reads the invitations list and redraws the settings when it changed. Without the server part the feature stays hidden. */
+async function refreshInvites() {
+  if (!cloud.signedIn()) { state._invites = undefined; return; }
+  let list;
+  try { list = await cloud.familyInvites(); } catch { return; }
+  const before = JSON.stringify(state._invites);
+  state._invites = list;
+  // Phone numbers are kept only on this device, and only while their invitation is in the list.
+  const phones = state.settings.invitePhones || {};
+  const live = new Set((list || []).map((r) => r.code));
+  const stale = Object.keys(phones).filter((c) => !live.has(c));
+  if (stale.length) { for (const c of stale) delete phones[c]; await saveSettings(); }
+  if (JSON.stringify(list) !== before && route().name === 'settings' && !document.querySelector('.scrim')) render();
+}
+
+/** The ready message with its "send in WhatsApp" button. */
+function openInviteMessage(name, code, phone) {
+  const text = inviteText(name, code);
+  return openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>ההודעה ל${esc(name)} מוכנה</h2>
+      <p class="muted">${phone ? 'וואטסאפ ייפתח על השיחה עם ההודעה מוכנה. נשאר רק ללחוץ שלח.' : 'וואטסאפ ייפתח עם ההודעה מוכנה, וישאל למי לשלוח.'}</p>
+      <div class="msg-preview" data-invite-text dir="rtl">${esc(text)}</div>
+      <div class="btn-row">
+        <a class="btn sunny" data-wa href="${esc(waLink(phone, text))}" target="_blank" rel="noopener">שליחה בוואטסאפ</a>
+        <button class="btn" type="button" data-copy>העתקת ההודעה</button>
+        <button class="btn" type="button" data-close>סגירה</button>
+      </div>`;
+    body.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-close]')) return close();
+      if (e.target.closest('[data-copy]')) {
+        try { await navigator.clipboard.writeText(text); toast('ההודעה הועתקה'); } catch { toast('ההעתקה לא הצליחה. אפשר לסמן את הטקסט ולהעתיק.'); }
+      }
+    });
+  }, { label: `ההודעה ל${name} מוכנה` });
+}
+
+/** "שיתוף כל המשפחה": a contact (picked or typed), one invitation to all the children, and the message. */
+async function openFamilyShare() {
+  if (!state.children.length) { toast('קודם מוסיפים ילד'); return; }
+  await cloud.sync(); // a child that was only on this device is in the family archive before anyone is invited to it
+  const canPick = !!(navigator.contacts && navigator.contacts.select);
+  const made = await openSheet((body, close) => {
+    body.innerHTML = `
+      <h2>שיתוף כל המשפחה</h2>
+      <p class="muted">מי שמוזמן מצורף ל${esc(state.children.length > 1 ? `כל הילדים יחד: ${nameList(state.children.map((c) => c.name))}` : state.children[0].name)}, רואה הכול ויכול להוסיף, לערוך ולמחוק, כמו כל בן משפחה.</p>
+      <form class="form" novalidate style="margin-top:14px">
+        ${canPick ? '<button class="btn" type="button" data-pick>בחירה מאנשי הקשר</button>' : ''}
+        <div class="field"><label for="fs-name">שם</label><input id="fs-name" class="input" name="name" maxlength="40" autocomplete="off" required></div>
+        <div class="field"><label for="fs-tel">מספר טלפון</label><input id="fs-tel" class="input" name="tel" type="tel" inputmode="tel" dir="ltr" autocomplete="off" placeholder="054-1234567">
+          <span class="small muted">${canPick ? 'המספר נשאר בטלפון הזה בלבד.' : 'הדפדפן הזה לא מאפשר לבחור מאנשי הקשר, אז מקלידים. המספר נשאר בטלפון הזה בלבד.'} בלי מספר, וואטסאפ ישאל למי לשלוח.</span></div>
+        <p class="small" data-err role="alert" style="color:var(--red-deep);min-height:1.4em"></p>
+        <div class="btn-row"><button class="btn" type="button" data-cancel>ביטול</button><button class="btn sunny" type="submit">הכנת ההודעה</button></div>
+      </form>`;
+    const form = $('form', body);
+    const err = $('[data-err]', body);
+    $('[data-cancel]', body).addEventListener('click', () => close(null));
+    form.addEventListener('input', () => { err.textContent = ''; });
+    const pick = $('[data-pick]', body);
+    if (pick) pick.addEventListener('click', async () => {
+      try {
+        const got = pickedContact(await navigator.contacts.select(['name', 'tel'], { multiple: false }));
+        if (!got) return;
+        if (got.name) form.elements.name.value = got.name;
+        if (got.tel) form.elements.tel.value = got.tel;
+        err.textContent = '';
+      } catch { /* the picker was closed, or the phone refused: the fields stay for typing */ }
+    });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = String(form.elements.name.value || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      const tel = String(form.elements.tel.value || '').trim();
+      const phone = tel ? waPhone(tel) : null;
+      if (!name) { err.textContent = 'צריך שם, כדי שההודעה תהיה אישית.'; return; }
+      if (tel && !phone) { err.textContent = 'המספר לא נראה כמו מספר טלפון. אפשר לתקן או להשאיר ריק.'; return; }
+      $$('button', form).forEach((b) => { b.disabled = true; });
+      err.textContent = '';
+      try {
+        const row = await cloud.createFamilyInvite(name);
+        close({ name, phone, code: row.code });
+      } catch (ex) {
+        err.textContent = ex instanceof TypeError ? 'אין חיבור לרשת.' : 'לא הצלחנו ליצור הזמנה. אפשר לנסות שוב.';
+        $$('button', form).forEach((b) => { b.disabled = false; });
+      }
+    });
+  }, { label: 'שיתוף כל המשפחה' });
+  if (!made) return;
+  if (made.phone) { state.settings.invitePhones = { ...(state.settings.invitePhones || {}), [made.code]: made.phone }; await saveSettings(); }
+  await refreshInvites();
+  await openInviteMessage(made.name, made.code, made.phone);
+}
+
+async function cancelInvite(code) {
+  const row = (state._invites || []).find((r) => r.code === code);
+  if (!row) return;
+  const open = inviteState(row) === 'open';
+  if (open && !(await confirmDialog(`לבטל את ההזמנה של ${row.invitee_name}?`, 'הקישור שנשלח יפסיק לעבוד.', { ok: 'ביטול ההזמנה', danger: true }))) return;
+  try { await cloud.cancelFamilyInvite(code); } catch { toast('הביטול לא הצליח'); return; }
+  toast(open ? 'ההזמנה בוטלה' : 'הוסר מהרשימה');
+  await refreshInvites();
 }
 
 // Every action that costs something has a free route beside it; the choice is made here, per device.
@@ -957,7 +1083,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.8</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.9</p>
   </main>`;
 }
 
@@ -974,7 +1100,7 @@ async function fillStorage() {
 
 // ---------- Events ----------
 function bindCommon() {
-  if (route().name === 'settings') { fillStorage(); refreshBackup(); }
+  if (route().name === 'settings') { fillStorage(); refreshBackup(); refreshInvites(); }
 }
 
 APP.addEventListener('click', async (e) => {
@@ -1060,6 +1186,14 @@ APP.addEventListener('click', async (e) => {
     render();
     return;
   }
+  const again = t.closest('[data-invite-again]');
+  if (again) {
+    const row = (state._invites || []).find((r) => r.code === again.dataset.inviteAgain);
+    if (row) await openInviteMessage(row.invitee_name, row.code, (state.settings.invitePhones || {})[row.code] || null);
+    return;
+  }
+  const cancel = t.closest('[data-invite-cancel]');
+  if (cancel) { await cancelInvite(cancel.dataset.inviteCancel); return; }
   const fam = t.closest('[data-family]');
   if (fam) { await openFamilySheet(childById(fam.dataset.family)); return; }
 
@@ -1140,6 +1274,7 @@ async function handleAction(act, r) {
     case 'cloud-signin': return openSignIn();
     case 'join-retry': return render();
     case 'install-guide': return openInstallGuide();
+    case 'family-share': return openFamilyShare();
     case 'kid-enter': return enterKid();
     case 'kid-pin': return changePin();
     case 'backup-connect': {
@@ -2231,10 +2366,11 @@ async function joinFlow(code) {
   if (!name) { go('', { replace: true }); return; }
   let joined = false;
   try {
-    const childId = await cloud.acceptInvite(code, name);
+    const ids = await cloud.acceptInvite(code, name);
     await cloud.sync();
     await load();
-    if (childById(childId)) { state.settings.activeChild = childId; saveSettings(); }
+    const first = ids.find((id) => childById(id));
+    if (first) { state.settings.activeChild = first; saveSettings(); }
     toast('הצטרפת. הציורים כבר כאן.');
     joined = true;
   } catch {
@@ -2624,6 +2760,7 @@ function startCloud() {
   const wake = () => {
     if (document.visibilityState !== 'visible' || !cloud.signedIn()) return;
     loadPrefs().then(askModeOnce);
+    if (route().name === 'settings') refreshInvites(); // who joined since the phone was last looked at
     cloud.sync().then(checkJobs).then(() => {
       // The backup's state: on opening, and then every 5 minutes (the settings screen asks by itself).
       if (Date.now() - backupSeen < 5 * 60000) return;

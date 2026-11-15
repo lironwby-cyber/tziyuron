@@ -14,7 +14,8 @@ export function startMock(port) {
   const turns = [];
   const motionSets = []; // movements the naming step answers next
   const wants = [];
-  const flags = { hint: false }; // does art_animation_jobs have the hint column yet
+  const flags = { hint: false, familyInvites: false }; // hint: does art_animation_jobs have the hint column yet; familyInvites: is migration 006 on the server yet
+  const familyInvites = [];
   // The backup to pCloud: off (as before migration 005) until a test turns it on. `hold` keeps files waiting.
   const backup = { enabled: false, connected: false, problem: false, hold: false, done: new Set(), failed: new Set(), sweeps: [], connects: 0, last: null };
   const backupOwner = () => (t.art_child_members[0] || {}).user_id;
@@ -132,6 +133,42 @@ export function startMock(port) {
         return send(res, 200, inv.child_id);
       }
 
+      // One invitation for all the inviter's children (migration 006).
+      if (path === '/rest/v1/art_family_invites' || path === '/rest/v1/rpc/art_accept_family_invite') {
+        if (!flags.familyInvites) return send(res, 404, { code: path.includes('/rpc/') ? 'PGRST202' : 'PGRST205', message: 'Could not find it in the schema cache' });
+        const kidsOf = (u) => t.art_child_members.filter((m) => m.user_id === u).map((m) => m.child_id);
+        const shares = (u) => u === uid || kidsOf(u).some((c) => isMember(uid, c));
+        if (path.includes('/rpc/')) {
+          const b = json();
+          const inv = familyInvites.find((i) => i.code === b.invite_code);
+          const kids = inv ? kidsOf(inv.created_by) : [];
+          if (!inv || inv.used_at || new Date(inv.expires_at) < new Date() || !kids.length) return send(res, 400, { message: 'invite is not valid' });
+          for (const c of kids) if (!isMember(uid, c)) t.art_child_members.push({ child_id: c, user_id: uid, display_name: (b.my_name || '').trim() || inv.invitee_name, created_at: now() });
+          inv.used_at = now(); inv.used_by = uid;
+          return send(res, 200, kids);
+        }
+        const match = matcher(url.searchParams);
+        if (req.method === 'GET') {
+          const sel = (url.searchParams.get('select') || '').split(',');
+          const out = familyInvites.filter((r) => shares(r.created_by) && match(r)).sort((x, y) => (x.created_at < y.created_at ? 1 : -1));
+          return send(res, 200, out.map((r) => Object.fromEntries(sel.map((k) => [k, r[k]]))));
+        }
+        if (req.method === 'POST') {
+          const b = json();
+          const name = String(b.invitee_name || '');
+          if (!name || name.length > 40) return send(res, 400, { code: '23514', message: 'check constraint' });
+          if (!kidsOf(uid).length) return send(res, 403, { code: '42501', message: 'row-level security' });
+          const row = { code: 'F' + randomUUID().replace(/-/g, ''), invitee_name: name, created_by: uid, created_at: now(), expires_at: new Date(Date.now() + 7 * 86400000).toISOString(), used_by: null, used_at: null };
+          familyInvites.push(row);
+          return send(res, 201, [row]);
+        }
+        if (req.method === 'DELETE') {
+          for (const r of familyInvites.filter((x) => shares(x.created_by) && match(x))) familyInvites.splice(familyInvites.indexOf(r), 1);
+          return send(res, 204);
+        }
+        return send(res, 405, {});
+      }
+
       if (path.startsWith('/rest/v1/')) {
         const name = path.slice('/rest/v1/'.length);
         const rows = t[name];
@@ -242,5 +279,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, backup, backupRun, users })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, familyInvites, backup, backupRun, users })));
 }

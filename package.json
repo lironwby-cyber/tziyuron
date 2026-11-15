@@ -1,6 +1,6 @@
 {
   "name": "tziyuron",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "private": true,
   "type": "module",
   "description": "ציורון: שמירת ציורי ילדים. PWA בעברית, עם ארכיון משפחתי משותף.",

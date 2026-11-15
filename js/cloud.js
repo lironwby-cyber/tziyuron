@@ -478,9 +478,32 @@ export async function createInvite(childId) {
   return rows[0].code;
 }
 
-/** Attach the signed-in user to the invitation's child. Returns the child id. */
-export function acceptInvite(code, myName) {
-  return rest('rpc/art_accept_invite', { method: 'POST', body: { invite_code: code, my_name: myName || null } });
+/** Attach the signed-in user to the invitation's child, or (a code that starts with F) to all the inviter's children. Returns the ids. */
+export async function acceptInvite(code, myName) {
+  const family = /^F/.test(code);
+  const got = await rest(family ? 'rpc/art_accept_family_invite' : 'rpc/art_accept_invite', { method: 'POST', body: { invite_code: code, my_name: myName || null } });
+  return Array.isArray(got) ? got : [got];
+}
+
+// ---------- One invitation for all the children ----------
+/** A one-time invitation to all my children, valid for 7 days. Only the name is kept on the server. */
+export async function createFamilyInvite(name) {
+  const rows = await rest('art_family_invites', { method: 'POST', body: { invitee_name: name }, headers: REP });
+  return rows[0];
+}
+
+/** Who was invited and who joined, newest first. Null when the server does not have this yet. */
+export async function familyInvites() {
+  try {
+    return await rest('art_family_invites?select=code,invitee_name,created_at,expires_at,used_at&order=created_at.desc&limit=50');
+  } catch (err) {
+    if (err && (err.status === 404 || /PGRST20[25]|42P01/.test(String(err.code || '')))) return null;
+    throw err;
+  }
+}
+
+export function cancelFamilyInvite(code) {
+  return rest(`art_family_invites?code=eq.${enc(code)}`, { method: 'DELETE' });
 }
 
 // ---------- Animation jobs ----------
