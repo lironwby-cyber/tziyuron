@@ -14,8 +14,10 @@ do $$ declare n int; begin
     insert into public.art_animation_jobs (memory_id, child_id, source_path, fired_at) select id, child_id, 'p', now() from public.art_memories where title = 'טיל';
     raise exception 'member forged fired_at';
   exception when insufficient_privilege then null; end;
-  update public.art_animation_jobs set result_url = 'https://x/y.mp4'; get diagnostics n = row_count;
-  if n <> 0 then raise exception 'member wrote a clip address'; end if;
+  begin
+    update public.art_animation_jobs set result_url = 'https://x/y.mp4';
+    raise exception 'member wrote a clip address';
+  exception when insufficient_privilege then null; end;
   begin perform public.art_job_notify(); raise exception 'member may call art_job_notify';
   exception when insufficient_privilege then null; when others then if sqlstate <> '0A000' and sqlstate <> '42501' then raise; end if; end;
 end $$;

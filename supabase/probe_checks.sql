@@ -52,8 +52,10 @@ do $$ declare n int; begin
     insert into public.art_animation_jobs (memory_id, child_id, source_path, status) select id, child_id, 'p', 'done' from public.art_memories where title = 'טיל';
     raise exception 'member forged a finished job';
   exception when insufficient_privilege then null; end;
-  update public.art_animation_jobs set status = 'done'; get diagnostics n = row_count;
-  if n <> 0 then raise exception 'member changed a job (only the scheduled task may)'; end if;
+  begin
+    update public.art_animation_jobs set status = 'done';
+    raise exception 'member changed a job (only the server may)';
+  exception when insufficient_privilege then null; end;
   delete from public.art_memories where title = 'מסבתא'; get diagnostics n = row_count;
   if n <> 1 then raise exception 'member cannot delete'; end if;
 end $$;
