@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
     if (!routine || !token) return json({ title: null, reason: 'not configured' });
     const res = await fetch(`https://api.anthropic.com/v1/claude_code/routines/${routine}/fire`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01', 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: `memory_id: ${memory.id}\nimage_jpeg_base64: ${picture}` }),
     });
     if (!res.ok) return json({ title: null, reason: res.status === 429 ? 'busy' : `task ${res.status}` });

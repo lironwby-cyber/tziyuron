@@ -46,7 +46,7 @@ async function start(jobId: string) {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
-      'anthropic-version': '2023-06-01',
+      'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ text: `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}` }),
