@@ -10,6 +10,7 @@ import { openCamera, cameraSupported } from './camera.js';
 import { openCropEditor } from './crop.js';
 import { recordAudio } from './recorder.js';
 import { openAnimator } from './anim.js';
+import { playFx } from './sfx.js';
 import * as cloud from './cloud.js';
 import { suggestFromTitle, cleanMotions, turnMotions } from './motion.js';
 import { waPhone, nameList, inviteMessage, waLink, inviteState, pickedContact } from './share.js';
@@ -385,8 +386,9 @@ function renderMemory(id) {
     ${m.caption ? `<div class="bubble">${esc(m.caption)}</div>` : ''}
     ${atts.length ? `<div class="voices">${atts.map((a, i) => (a.kind === 'voice'
       ? voiceRowHtml(a.blob, a.duration, a.id, `השמעת הקלטה ${i + 1}`)
-      : `<div class="voice video"><video controls playsinline preload="metadata" ${a.kind === 'animation' ? 'loop' : ''} data-blob="${esc(a.blob)}"></video>
+      : `<div class="voice video"><video controls playsinline preload="metadata" ${a.kind === 'animation' ? 'loop data-anim' : ''} ${a.fx ? `data-fx="${esc(a.fx)}"` : ''} data-blob="${esc(a.blob)}"></video>
           <div class="row"><button class="icon-btn" data-del-att="${esc(a.id)}" aria-label="מחיקת הסרטון">${ICONS.trash}</button></div></div>`)).join('')}</div>` : ''}
+    ${atts.some((a) => a.kind === 'animation') && atts.some((a) => a.kind === 'voice') ? `<button class="btn violet anim-voice" data-act="anim-voice">${ICONS.play}ההנפשה עם הקול של ${esc(child ? child.name : 'הילד')}</button>` : ''}
     ${animStatusHtml(m)}
     ${canAttach ? `<div class="doers">
       <button class="doer" data-act="rec-voice">${art('mic')}הקלטת קול</button>
@@ -723,13 +725,19 @@ function renderKids(r) {
   </main>`;
 }
 
+/** The sound effect of a saved animation, when it was made with one. */
+function clipFx(m, clip) {
+  const a = (m.attachments || []).find((x) => x.blob === clip);
+  return a && a.kind === 'animation' && a.fx ? a.fx : '';
+}
+
 function renderKidView(list, i, child) {
   const m = list[i];
   const clip = kidClip(m);
   const showClip = clip && (state._kidClip === m.id || !m.image);
   const voices = kidVoices(m);
   const stage = showClip
-    ? `<video data-blob="${esc(clip)}" ${m.image ? `data-poster="${esc(m.image)}"` : ''} autoplay loop playsinline controls></video>`
+    ? `<video data-blob="${esc(clip)}" ${m.image ? `data-poster="${esc(m.image)}"` : ''} ${clipFx(m, clip) ? `data-fx="${esc(clipFx(m, clip))}"` : ''} autoplay loop playsinline controls></video>`
     : `<img data-blob="${esc(m.image)}" alt="${esc(m.title || 'ציור')}">`;
   return `<div class="kid-view" style="${kidVars(child)}">
     <div class="kid-bar">
@@ -772,7 +780,12 @@ function kidClick(t) {
   if (t.closest('[data-kid-close]')) { state._kidClip = null; go('', { replace: true }); return; }
   const step = t.closest('[data-kid-step]');
   if (step) { kidStep(Number(step.dataset.kidStep)); return; }
-  if (t.closest('[data-kid-clip]')) { state._kidClip = state._kidClip === route().id ? null : route().id; render(); return; }
+  if (t.closest('[data-kid-clip]')) {
+    state._kidClip = state._kidClip === route().id ? null : route().id;
+    // The drawing moves and the child's own voice tells about it, together.
+    render().then(() => { const row = $('.kid-voices [data-voice]'); if (state._kidClip && row) togglePlay(row); });
+    return;
+  }
   const playBtn = t.closest('[data-play]');
   if (playBtn) togglePlay(playBtn.closest('[data-voice]'));
 }
@@ -795,6 +808,20 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') kidStep(1);
   else if (e.key === 'ArrowRight') kidStep(-1);
 });
+
+// A saved animation made with a sound effect plays it at the start of every loop.
+document.addEventListener('play', (e) => {
+  const v = e.target;
+  if (!(v instanceof HTMLVideoElement) || !v.dataset.fx) return;
+  v._fxAt = v.currentTime;
+  playFx(v.dataset.fx);
+}, true);
+document.addEventListener('timeupdate', (e) => {
+  const v = e.target;
+  if (!(v instanceof HTMLVideoElement) || !v.dataset.fx || v.paused) return;
+  if (v.currentTime + 0.5 < (v._fxAt || 0)) playFx(v.dataset.fx);
+  v._fxAt = v.currentTime;
+}, true);
 
 // ---------- Settings ----------
 function familyPanelHtml() {
@@ -1085,7 +1112,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.10.2</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.11</p>
   </main>`;
 }
 
@@ -1364,10 +1391,24 @@ async function handleAction(act, r) {
       }
       case 'suggest-title': {
         const got = await nameDrawings([m.id], { manual: true });
-        if (!got) toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000);
+        if (!got) recogMiss('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".');
         return;
       }
       case 'animate': return chooseAnimation(m);
+      case 'anim-voice': {
+        // The newest animation plays from its start while the first recording of the child is heard.
+        const vids = $$('video[data-anim]', APP);
+        const video = vids[vids.length - 1];
+        const row = $('.voices [data-voice]', APP);
+        if (!video || !row) return;
+        const audio = row.querySelector('audio');
+        video.currentTime = 0;
+        video.play().catch(() => {});
+        video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (audio.paused) togglePlay(row);
+        audio.addEventListener('ended', () => video.pause(), { once: true });
+        return;
+      }
       case 'anim-clear': {
         const { anim, ...rest } = m;
         const updated = { ...rest, updatedAt: Date.now() };
@@ -2229,8 +2270,10 @@ async function animateMemory(m, { motions = [], first = 0 } = {}) {
   const res = await openAnimator(rec.blob, m.title || 'ציור', { motions, first });
   if (!res) return;
   const b = blobRecord(res.blob, 'video', { memoryId: m.id });
-  const att = { id: uid(), kind: 'animation', style: res.style, ...(res.label ? { label: res.label } : {}), blob: b.id, duration: res.duration, createdAt: Date.now() };
+  const att = { id: uid(), kind: 'animation', style: res.style, ...(res.label ? { label: res.label } : {}), ...(res.fx ? { fx: res.fx } : {}), blob: b.id, duration: res.duration, createdAt: Date.now() };
   const updated = { ...m, attachments: [...(m.attachments || []), att], updatedAt: Date.now() };
+  // A figure picked by a touch is remembered, so the next animation of this drawing moves the same figure.
+  if (res.picked) { const kept = cleanMotions(res.motions); if (kept.length) updated.motions = kept; }
   await db.putMany([['blobs', b], ['memories', updated]]);
   Object.assign(m, updated);
   toast('ההנפשה נשמרה ליד הציור');
@@ -2590,9 +2633,23 @@ async function smallPicture(m) {
  * suggestion: it is marked as automatic, never replaces a name someone typed, and a drawing that is not
  * recognised simply stays without a name. Returns how many drawings got a name or are waiting for one.
  */
+// Why the last request to recognise a drawing came back empty, so the message says the real cause
+// (a disconnected service is not "I could not tell what is drawn").
+let recogReason = '';
+function recogMiss(fallback) {
+  const r = recogReason;
+  recogReason = '';
+  if (/^task 40[13]|not configured/.test(r)) return toast('הזיהוי לא זמין כרגע: החיבור לשירות הזיהוי נותק, וצריך לחדש אותו. בינתיים אפשר לכתוב שם ב"עריכה" ולבחור תנועה ביד.', 7000);
+  if (/busy|task 429/.test(r)) return toast('שירות הזיהוי עמוס. אפשר לנסות שוב בעוד דקה.', 5000);
+  if (/no picture|picture size/.test(r)) return toast('התמונה עוד לא עלתה לארכיון. אפשר לנסות שוב בעוד רגע.', 5000);
+  if (r === 'network') return toast('אין חיבור לשרת. אפשר לנסות שוב.', 5000);
+  return toast(fallback, 5000);
+}
+
 async function nameDrawings(ids, { manual = false } = {}) {
   const route = state.settings.titleRoute === 'free' ? 'free' : 'paid';
   if (!ids.length || !cloud.signedIn() || (state.settings.titleRoute === 'off' && !manual)) return 0;
+  recogReason = '';
   state._naming = state._naming || new Map(); // id -> time the free route was asked (0 on the paid route)
   ids.forEach((id) => state._naming.set(id, 0));
   const refresh = () => { if (!document.querySelector('.scrim') && !state.review) render(); };
@@ -2607,7 +2664,8 @@ async function nameDrawings(ids, { manual = false } = {}) {
       let res = {};
       try {
         if (m && !m.title) res = await cloud.suggestTitle(id, route === 'free' ? { route, picture: await smallPicture(m) } : {});
-      } catch { /* offline or not set up: the drawing keeps no name */ }
+      } catch { res = { reason: 'network' }; /* offline or not set up: the drawing keeps no name */ }
+      if (res.reason) recogReason = res.reason;
       if (res.queued) {
         state._naming.set(id, Date.now());
         waiting.push(id);
@@ -2679,7 +2737,8 @@ async function seekMotions(m) {
   try {
     await cloud.sync();
     res = await cloud.suggestTitle(m.id, { want: 'motions', route, picture: route === 'free' ? await smallPicture(m) : null });
-  } catch { /* offline or not set up */ }
+  } catch { res = { reason: 'network' }; }
+  recogReason = res.reason || '';
   if (res.queued) { awaitNames(); return 'waiting'; }
   state._seeking.delete(m.id);
   const fit = cleanMotions(res.motions);
@@ -2765,7 +2824,7 @@ async function chooseAnimation(m) {
       if (!m.title) return;
     } else if (step === 'auto') {
       const got = await nameDrawings([m.id], { manual: true });
-      if (!got) { toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000); return; }
+      if (!got) { recogMiss('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".'); return; }
       if (!m.title) return; // the free route: the name arrives in about a minute, and the toast said so
     } else if (step !== 'go') return;
   }
@@ -2775,7 +2834,7 @@ async function chooseAnimation(m) {
     const got = await seekMotions(m);
     render();
     if (got === 'waiting') { toast('ההצעות לפי הציור יהיו מוכנות בעוד כדקה. אפשר להמשיך בינתיים.', 5000); return; }
-    if (!got) toast('לא הצלחתי לזהות בציור משהו להזיז.', 5000);
+    if (!got) recogMiss('לא הצלחתי לזהות בציור משהו להזיז. אפשר להקיש על הדמות בציור כדי לבחור אותה.');
     pick = await pickMotion(m);
   }
   if (!pick || pick === 'seek') return;

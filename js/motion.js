@@ -130,28 +130,36 @@ export function pose(motion, p, f, W, H, dir) {
   const roomY = Math.max(0, Math.min(f.cy - f.h / 2, H - f.cy - f.h / 2));
   const ax = Math.max(14, Math.min(W * 0.24, roomX + f.w * 0.12));
   const ay = Math.max(10, Math.min(H * 0.12, roomY + f.h * 0.1));
-  const out = { dx: 0, dy: 0, rot: 0, sx: 1, sy: 1, anchor: 'center', wrapX: 0, wrapY: 0, wave: 0 };
+  const out = { dx: 0, dy: 0, rot: 0, sx: 1, sy: 1, anchor: 'center', wrapX: 0, wrapY: 0, wave: 0, glow: 0 };
   const sign = dir === 'left' ? -1 : 1;
+  // Back and forth: the figure sets off the way it was drawn facing (dir, right when unknown), and turns
+  // around at each end instead of sliding backwards. The turn is a quick squeeze through the middle.
+  const across = (k) => {
+    out.dx = sign * k * Math.sin(T * p);
+    out.sx = facing(p);
+  };
   switch (motion) {
     case 'fly':
-      out.dx = ax * Math.sin(T * p); out.dy = ay * 0.8 * (Math.sin(T * 2 * p + 1.2) - Math.sin(1.2));
-      out.rot = 0.14 * Math.sin(T * p); out.sx = 1 - 0.28 * Math.abs(Math.sin(T * 6 * p));
+      across(ax);
+      out.dy = ay * 0.8 * (Math.sin(T * 2 * p + 1.2) - Math.sin(1.2));
+      out.rot = sign * 0.08 * Math.sin(T * 2 * p);
+      out.sy = 1 + 0.06 * Math.sin(T * 8 * p); // a soft beat of the wings, not a flicker of the whole figure
       break;
     case 'glide':
-      out.dx = ax * Math.sin(T * p); out.dy = ay * 0.7 * Math.sin(T * 2 * p); out.rot = 0.1 * Math.sin(T * p);
+      across(ax); out.dy = ay * 0.7 * Math.sin(T * 2 * p); out.rot = sign * 0.06 * Math.sin(T * 2 * p);
       break;
     case 'rise':
       out.wrapY = H + f.h; out.dy = -out.wrapY * p; out.dx = 3 * Math.sin(T * 9 * p);
       break;
     case 'swim':
-      out.dx = ax * Math.sin(T * p); out.dy = ay * 0.25 * Math.sin(T * 2 * p); out.rot = 0.05 * Math.sin(T * 2 * p); out.wave = 1;
+      across(ax); out.dy = ay * 0.25 * Math.sin(T * 2 * p); out.rot = 0.05 * Math.sin(T * 2 * p); out.wave = 1;
       break;
     case 'drive':
-      if (dir === 'left' || dir === 'right') { out.wrapX = W + f.w; out.dx = sign * out.wrapX * p; } else out.dx = ax * Math.sin(T * p);
+      if (dir === 'left' || dir === 'right') { out.wrapX = W + f.w; out.dx = sign * out.wrapX * p; } else across(ax);
       out.dy = -2 * Math.abs(Math.sin(T * 10 * p)); out.anchor = 'bottom';
       break;
     case 'walk':
-      out.dx = ax * Math.sin(T * p); out.dy = -5 * Math.abs(Math.sin(T * 8 * p)); out.rot = 0.045 * Math.sin(T * 8 * p); out.anchor = 'bottom';
+      across(ax); out.dy = -5 * Math.abs(Math.sin(T * 8 * p)); out.rot = 0.045 * Math.sin(T * 8 * p); out.anchor = 'bottom';
       break;
     case 'jump': {
       const q = (p * 4) % 1, up = 4 * q * (1 - q);
@@ -166,16 +174,86 @@ export function pose(motion, p, f, W, H, dir) {
       break;
     case 'twinkle': {
       const s = 1 + 0.07 * Math.sin(T * 4 * p);
-      out.sx = s; out.sy = s; out.glow = 0.5 + 0.5 * Math.sin(T * 4 * p);
+      out.sx = s; out.sy = s; out.glow = 0.5 - 0.5 * Math.cos(T * 4 * p); // 0 at the start and the end of the loop
       break;
     }
     case 'fall':
       out.wrapY = H + f.h; out.dy = out.wrapY * p; out.dx = 10 * Math.sin(T * 3 * p); out.rot = 0.08 * Math.sin(T * 3 * p);
       break;
     case 'float':
-      out.dx = ax * 0.6 * Math.sin(T * p); out.dy = -6 * (1 - Math.cos(T * 2 * p)); out.rot = 0.035 * Math.sin(T * 2 * p); out.anchor = 'bottom';
+      across(ax * 0.6); out.dy = -6 * (1 - Math.cos(T * 2 * p)); out.rot = 0.035 * Math.sin(T * 2 * p); out.anchor = 'bottom';
       break;
     default:
   }
   return out;
+}
+
+/**
+ * Which way a figure that goes back and forth faces at moment p: 1 as drawn, -1 mirrored. Around the two
+ * turning points (p = 0.25 and 0.75) it passes smoothly through 0, which reads as turning around.
+ */
+export function facing(p) {
+  const c = Math.cos(Math.PI * 2 * p);
+  return Math.max(-1, Math.min(1, c / 0.18));
+}
+
+/** Movements that go somewhere, for which the way the figure faces matters. */
+export const DIRECTED = ['fly', 'glide', 'swim', 'drive', 'walk', 'float'];
+
+/**
+ * The figure a finger touched: the strokes around point (x, y) of a stage of width W, joined when they are
+ * closer than a few pixels, as a box [x, y, w, h] from 0 to 1 of the drawing's place R on the stage.
+ * d = RGBA pixels of the stage, paper = [r, g, b] of the page. Returns null when nothing is drawn near the touch.
+ */
+export function inkRegion(d, W, R, paper, x, y) {
+  const CELL = 4, GAP = 2; // cells of 4 px; strokes up to 2 cells (8 px) apart belong to one figure
+  const cw = Math.ceil(R.w / CELL), ch = Math.ceil(R.h / CELL);
+  const ink = new Uint8Array(cw * ch);
+  for (let cy = 0; cy < ch; cy++) {
+    for (let cx = 0; cx < cw; cx++) {
+      let hit = 0;
+      for (let yy = 0; yy < CELL && !hit; yy++) {
+        const py = R.y + cy * CELL + yy;
+        if (py >= R.y + R.h) break;
+        for (let xx = 0; xx < CELL; xx++) {
+          const px = R.x + cx * CELL + xx;
+          if (px >= R.x + R.w) break;
+          const i = (py * W + px) * 4;
+          if (Math.max(Math.abs(d[i] - paper[0]), Math.abs(d[i + 1] - paper[1]), Math.abs(d[i + 2] - paper[2])) > 48) { hit = 1; break; }
+        }
+      }
+      ink[cy * cw + cx] = hit;
+    }
+  }
+  // Start at the touched cell, or at the nearest ink within a fingertip (about 40 px).
+  const tx = Math.floor((x - R.x) / CELL), ty = Math.floor((y - R.y) / CELL);
+  let start = -1, best = Infinity;
+  const reach = Math.ceil(40 / CELL);
+  for (let cy = Math.max(0, ty - reach); cy <= Math.min(ch - 1, ty + reach); cy++) {
+    for (let cx = Math.max(0, tx - reach); cx <= Math.min(cw - 1, tx + reach); cx++) {
+      if (!ink[cy * cw + cx]) continue;
+      const dist = (cx - tx) ** 2 + (cy - ty) ** 2;
+      if (dist < best) { best = dist; start = cy * cw + cx; }
+    }
+  }
+  if (start < 0 || best > reach * reach) return null;
+  const seen = new Uint8Array(cw * ch);
+  const stack = [start];
+  seen[start] = 1;
+  let x0 = cw, y0 = ch, x1 = -1, y1 = -1;
+  while (stack.length) {
+    const c = stack.pop();
+    const cx = c % cw, cy = (c - cx) / cw;
+    if (cx < x0) x0 = cx; if (cx > x1) x1 = cx; if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+    for (let ny = Math.max(0, cy - GAP); ny <= Math.min(ch - 1, cy + GAP); ny++) {
+      for (let nx = Math.max(0, cx - GAP); nx <= Math.min(cw - 1, cx + GAP); nx++) {
+        const n = ny * cw + nx;
+        if (ink[n] && !seen[n]) { seen[n] = 1; stack.push(n); }
+      }
+    }
+  }
+  const r = (v) => Math.round(v * 1000) / 1000;
+  const bx = (x0 * CELL) / R.w, by = (y0 * CELL) / R.h;
+  const bw = Math.min(1 - bx, ((x1 - x0 + 1) * CELL) / R.w), bh = Math.min(1 - by, ((y1 - y0 + 1) * CELL) / R.h);
+  return [r(bx), r(by), r(Math.max(0.02, bw)), r(Math.max(0.02, bh))];
 }

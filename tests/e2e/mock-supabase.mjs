@@ -261,6 +261,7 @@ export function startMock(port) {
           setTimeout(() => { if (title && !m.title) Object.assign(m, { title, details: { ...m.details, autoTitle: true, ...(turn ? { turn } : {}), ...(motions ? { motions } : {}) }, updated_at: now() + '-task' }); }, 1500);
           return send(res, 200, { queued: true, eta_seconds: 60 });
         }
+        if (titles.length && titles[0] && typeof titles[0] === 'object') return send(res, 200, { title: null, ...titles.shift() }); // a refusal: { reason }
         return send(res, 200, { title: titles.length ? titles.shift() : null, turn: turns.length ? turns.shift() : 0, motions: motionSets.length ? motionSets.shift() : [] });
       }
 

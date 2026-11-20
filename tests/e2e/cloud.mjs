@@ -333,10 +333,14 @@ try {
     await importDrawing('');
     await A.getByRole('button', { name: 'הצעת שם' }).waitFor({ timeout: 20000 });
     assert.equal(await A.locator('[data-auto-title]').count(), 0);
+    // A disconnected recognition service says so, instead of "could not tell what is drawn".
+    mock.titles.push({ reason: 'task 401' });
+    await A.getByRole('button', { name: 'הצעת שם' }).click();
+    await A.getByText('החיבור לשירות הזיהוי נותק').waitFor({ timeout: 10000 });
     mock.titles.push('הר ושמש');
     await A.getByRole('button', { name: 'הצעת שם' }).click();
     await A.getByRole('heading', { name: 'הר ושמש' }).waitFor();
-    assert.equal(mock.titleCalls.length, 3);
+    assert.equal(mock.titleCalls.length, 4);
   });
 
   const mainSize = () => A.locator('img[data-main]').evaluate((i) => (i.complete && i.naturalWidth ? `${i.naturalWidth}x${i.naturalHeight}` : ''));
