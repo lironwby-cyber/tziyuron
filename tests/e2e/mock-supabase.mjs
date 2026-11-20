@@ -14,9 +14,10 @@ export function startMock(port) {
   const turns = [];
   const motionSets = []; // movements the naming step answers next
   const wants = [];
-  const flags = { hint: false, familyInvites: false }; // hint: does art_animation_jobs have the hint column yet; familyInvites: is migration 006 on the server yet
+  const flags = { hint: false, familyInvites: false, noUpload: false, noMove: false }; // hint: does art_animation_jobs have the hint column yet; familyInvites: is migration 006 on the server yet
   const familyInvites = [];
   const recovers = []; // password-reset emails that would have been sent
+  const moves = []; // files moved between children's folders
   // The backup to pCloud: off (as before migration 005) until a test turns it on. `hold` keeps files waiting.
   const backup = { enabled: false, connected: false, problem: false, hold: false, done: new Set(), failed: new Set(), sweeps: [], connects: 0, last: null };
   const backupOwner = () => (t.art_child_members[0] || {}).user_id;
@@ -271,6 +272,16 @@ export function startMock(port) {
           for (const p of json().prefixes) if (allowed(p)) files.delete(p);
           return send(res, 200, []);
         }
+        if (rest === 'move' && req.method === 'POST') {
+          const b = json();
+          if (flags.noMove) return send(res, 500, { message: 'move is broken' });
+          if (!allowed(b.sourceKey) || !allowed(b.destinationKey)) return send(res, 403, { message: 'row-level security' });
+          if (!files.has(b.sourceKey)) return send(res, 404, { message: 'Object not found' });
+          files.set(b.destinationKey, files.get(b.sourceKey));
+          files.delete(b.sourceKey);
+          moves.push(b);
+          return send(res, 200, { message: 'Successfully moved' });
+        }
         if (rest === 'list/art') {
           const prefix = json().prefix + '/';
           if (!allowed(prefix)) return send(res, 200, []);
@@ -285,6 +296,7 @@ export function startMock(port) {
         if (rest.startsWith('art/') && req.method === 'POST') {
           const p = rest.slice(4);
           if (!allowed(p)) return send(res, 403, { message: 'row-level security' });
+          if (flags.noUpload) return send(res, 503, { message: 'storage is down' });
           files.set(p, { type: req.headers['content-type'], data: raw });
           return send(res, 200, { Key: 'art/' + p });
         }
@@ -294,5 +306,5 @@ export function startMock(port) {
       send(res, 500, { message: String(err && err.message) });
     }
   });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, familyInvites, recovers, backup, backupRun, users })));
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, tables: t, files, users, log, titles, titleCalls, freePictures, turns, motionSets, wants, flags, familyInvites, recovers, moves, backup, backupRun, users })));
 }

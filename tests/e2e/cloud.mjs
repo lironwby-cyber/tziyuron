@@ -971,6 +971,98 @@ try {
     await I.context().close();
   });
 
+  await check('a drawing moved to another child takes its files along, and a drawing is not announced before its files arrived', async () => {
+    // What happened on the site: two drawings were moved to another child right after saving. Their files stayed in
+    // the first child's folder, so everyone else saw a drawing with no picture and the animation said "not found".
+    const kids = await A.evaluate(async () => (await window.__tziyuron.db.getAll('children')).map((c) => c.id));
+    assert.ok(kids.length >= 2, 'two children to move between');
+    // The two children have different family members: the grandmother is attached to one of them only, and the
+    // drawing moves into that one. Access is decided by the child, so she must not see it before and must see it after.
+    const savtaId = mock.users.get('savta@example.com').id;
+    const [from, to] = kids;
+    mock.tables.art_child_members = mock.tables.art_child_members.filter((r) => r.user_id !== savtaId);
+    mock.tables.art_child_members.push({ child_id: to, user_id: savtaId, display_name: 'סבתא', created_at: new Date().toISOString() });
+    const ids = { m: 'mmmm0000-0000-4000-8000-000000000001', image: 'ffff0000-0000-4000-8000-000000000001', original: 'ffff0000-0000-4000-8000-000000000002', thumb: 'ffff0000-0000-4000-8000-000000000003' };
+    const fileIds = [ids.image, ids.original, ids.thumb];
+    const rowOf = () => mock.tables.art_memories.find((r) => r.id === ids.m);
+    const folderOf = (id) => [...mock.files.keys()].filter((k) => k.endsWith('/' + id)).map((k) => k.split('/')[0]);
+
+    // While the files cannot be sent, the drawing itself is held back: nobody is told about a drawing with no picture.
+    mock.flags.noUpload = true;
+    await A.evaluate(async ({ ids, from }) => {
+      const blob = (role) => ({ id: ids[role], blob: new Blob([role + ' bytes'], { type: 'image/jpeg' }), type: 'image/jpeg', role, memoryId: ids.m });
+      const now = Date.now();
+      await window.__tziyuron.db.putMany([
+        ['blobs', blob('image')], ['blobs', blob('original')], ['blobs', blob('thumb')],
+        ['memories', { id: ids.m, childId: from, type: 'artwork', title: 'ציור שעובר', caption: '', date: '2026-11-18', createdAt: now, updatedAt: now, image: ids.image, original: ids.original, thumb: ids.thumb, attachments: [] }],
+      ]);
+      await window.__tziyuron.cloud.sync();
+    }, { ids, from });
+    assert.equal(rowOf(), undefined, 'the drawing waits for its files');
+    assert.ok((await A.evaluate(() => window.__tziyuron.cloud.getStatus().error)), 'the trouble is shown, not hidden');
+    mock.flags.noUpload = false;
+    await sync(A);
+    await settled(A);
+    assert.equal(rowOf().child_id, from);
+    for (const id of fileIds) assert.deepEqual(folderOf(id), [from]);
+    await sync(B);
+    await settled(B);
+    assert.equal(await B.evaluate((id) => window.__tziyuron.db.get('memories', id).then((m) => !!m), ids.m), false, 'not hers to see yet');
+
+    // Moved to the other child: the files move with it, in the archive itself.
+    const before = mock.moves.length;
+    await A.evaluate(async ({ ids, to }) => {
+      const m = await window.__tziyuron.db.get('memories', ids.m);
+      await window.__tziyuron.db.put('memories', { ...m, childId: to, updatedAt: Date.now() });
+      await window.__tziyuron.cloud.sync();
+    }, { ids, to });
+    await settled(A);
+    assert.equal(rowOf().child_id, to);
+    for (const id of fileIds) assert.deepEqual(folderOf(id), [to], 'the file is in the folder of the new child only');
+    assert.equal(mock.moves.length - before, 3);
+
+    // The grandmother, who never held these files, gets the picture from the new folder.
+    await sync(B);
+    await settled(B);
+    assert.equal(await B.evaluate(async (id) => { const r = await window.__tziyuron.cloud.ensureBlob(id); return r && r.blob ? await r.blob.text() : null; }, ids.image), 'image bytes');
+
+    // The state that was found on the site (files left behind in the first folder) heals on the next opening of the app.
+    for (const id of fileIds) { mock.files.set(`${from}/${id}`, mock.files.get(`${to}/${id}`)); mock.files.delete(`${to}/${id}`); }
+    await A.reload();
+    await A.waitForFunction(() => window.__tziyuron && window.__tziyuron.cloud.getStatus().lastSyncAt > 0, null, { timeout: 20000 });
+    await settled(A);
+    for (const id of fileIds) assert.deepEqual(folderOf(id), [to], 'put back where the drawing is');
+
+    // A file the archive lost altogether is sent again by a device that still holds it.
+    mock.files.delete(`${to}/${ids.original}`);
+    await A.reload();
+    await A.waitForFunction(() => window.__tziyuron && window.__tziyuron.cloud.getStatus().lastSyncAt > 0, null, { timeout: 20000 });
+    await settled(A);
+    assert.deepEqual(folderOf(ids.original), [to]);
+
+    // When the archive cannot move a file, the device that holds it sends it to the right folder instead.
+    for (const id of fileIds) { mock.files.set(`${from}/${id}`, mock.files.get(`${to}/${id}`)); mock.files.delete(`${to}/${id}`); }
+    mock.flags.noMove = true;
+    await A.reload();
+    await A.waitForFunction(() => window.__tziyuron && window.__tziyuron.cloud.getStatus().lastSyncAt > 0, null, { timeout: 20000 });
+    await settled(A);
+    mock.flags.noMove = false;
+    for (const id of fileIds) assert.ok(folderOf(id).includes(to), 'readable where the drawing is');
+
+    // Tidy: the drawing and its files leave, so the checks that follow see the archive as before.
+    await A.evaluate(async (ids) => {
+      await window.__tziyuron.db.delMany([['memories', ids.m], ['blobs', ids.image], ['blobs', ids.original], ['blobs', ids.thumb]]);
+      await window.__tziyuron.cloud.sync();
+    }, ids);
+    await settled(A);
+    for (const id of fileIds) mock.files.delete(`${from}/${id}`);
+    assert.equal(rowOf(), undefined);
+    const k = mock.tables.art_child_members.findIndex((r) => r.user_id === savtaId && r.child_id === to);
+    mock.tables.art_child_members.splice(k, 1);
+    await sync(B);
+    await settled(B);
+  });
+
   await check('sign-out keeps the local copy and stops sending', async () => {
     await A.goto(BASE + '#/settings');
     await A.getByRole('button', { name: 'יציאה', exact: true }).click();

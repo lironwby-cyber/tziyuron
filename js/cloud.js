@@ -265,10 +265,57 @@ async function removeFiles(paths) {
 async function listFiles(prefix) {
   const out = [];
   for (const folder of [prefix, `${prefix}/anim`]) {
-    const rows = await call(`/storage/v1/object/list/${config.bucket}`, { method: 'POST', body: { prefix: folder, limit: 1000 } });
-    for (const r of rows || []) if (r.id) out.push(`${folder}/${r.name}`);
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await call(`/storage/v1/object/list/${config.bucket}`, { method: 'POST', body: { prefix: folder, limit: 1000, offset } });
+      for (const r of rows || []) if (r.id) out.push(`${folder}/${r.name}`);
+      if (!rows || rows.length < 1000) break;
+    }
   }
   return out;
+}
+
+// ---------- Files follow their drawing ----------
+// A file lives in the folder of its drawing's child. When a drawing is moved to another child, its files have to
+// move too, or everyone else looks in the new folder and finds a drawing with no picture (found 20/11/2026: two
+// drawings moved right after saving). The same pass sends again a file that this device holds and the archive lacks.
+let mendWanted = true; // once per opening of the app, and after every drawing that was sent
+
+async function mendFiles() {
+  const [children, memories, outbox] = await Promise.all([db.getAll('children'), db.getAll('memories'), db.getAll('outbox')]);
+  const pending = new Set(outbox.map((e) => e.id));
+  const where = new Map(); // file id -> the child folder it is in
+  for (const c of children) {
+    if (pending.has(keyOf('children', c.id))) continue; // not in the archive yet
+    for (const path of await listFiles(c.id)) {
+      const [folder, name, deeper] = path.split('/');
+      if (!deeper) where.set(name, folder);
+    }
+  }
+  const known = new Set(children.map((c) => c.id));
+  const again = [];
+  let moved = 0;
+  for (const m of memories) {
+    if (!known.has(m.childId) || pending.has(keyOf('memories', m.id))) continue;
+    for (const id of memoryBlobIds(m)) {
+      const rec = await db.get('blobs', id);
+      if (!rec || rec.path || rec.childId || pending.has(keyOf('blobs', id))) continue;
+      const at = where.get(id);
+      if (at === m.childId) continue;
+      if (at) {
+        try {
+          await call('/storage/v1/object/move', { method: 'POST', body: { bucketId: config.bucket, sourceKey: `${at}/${id}`, destinationKey: `${m.childId}/${id}` } });
+          moved += 1;
+          continue;
+        } catch (err) {
+          if (!rec.blob) throw err; // nothing here to send instead: tried again on the next opening
+        }
+      }
+      if (rec.blob) again.push(['blobs', rec]);
+    }
+  }
+  if (moved) sentFiles += moved; // the backup copies them under the right child
+  if (again.length) await note('put', again);
+  return again.length > 0;
 }
 
 async function filesOf(m) {
@@ -292,8 +339,9 @@ async function pushEntry(e) {
       const row = await upsert('art_children', childToRow(rec), known);
       if (row) await mark(row.updated_at); // a child that is gone is cleared by the pull that follows
     } else if (e.store === 'memories') {
+      if (memoryBlobIds(rec).some((id) => unsent.has(id))) throw new Error('the files of this drawing are not in the archive yet');
       const row = await upsert('art_memories', memoryToRow(rec, await filesOf(rec)), known);
-      if (row) await mark(row.updated_at);
+      if (row) { await mark(row.updated_at); mendWanted = true; }
       else { await dropLocalMemory(rec); return true; }
     } else if (rec.blob) {
       const path = blobPath(rec, await childOfBlob(rec));
@@ -321,18 +369,21 @@ async function pushEntry(e) {
 const ORDER = ['put:children', 'put:blobs', 'put:memories', 'del:memories', 'del:blobs', 'del:children'];
 
 let sentFiles = 0; // files sent to the family archive since the backup was last told
+let unsent = new Set(); // files whose sending failed in this round: their drawing waits for them
 
 async function push() {
   const entries = await db.getAll('outbox');
   entries.sort((a, b) => ORDER.indexOf(`${a.op}:${a.store}`) - ORDER.indexOf(`${b.op}:${b.store}`) || a.at - b.at);
   let firstError = null;
   let changed = false;
+  unsent = new Set();
   for (const e of entries) {
     try {
       if (await pushEntry(e)) changed = true;
       const now = await db.get('outbox', e.id);
       if (now && now.at === e.at) await db.delMany([['outbox', e.id]], { silent: true });
     } catch (err) {
+      if (e.op === 'put' && e.store === 'blobs') unsent.add(e.rid);
       if (!firstError) firstError = err;
       if (!session || err.status === 401) break;
     }
@@ -484,6 +535,10 @@ export function sync() {
         again = false;
         if (await push()) changed = true;
         if (await pull()) changed = true;
+        if (mendWanted) {
+          mendWanted = false;
+          try { if (await mendFiles()) again = true; } catch (err) { mendWanted = true; console.warn('mend', err); }
+        }
       } while (again);
       status.error = '';
       status.lastSyncAt = Date.now();

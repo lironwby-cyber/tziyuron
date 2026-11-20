@@ -1085,7 +1085,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.10</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.10.2</p>
   </main>`;
 }
 

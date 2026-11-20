@@ -1,5 +1,5 @@
 // Offline support: cache the app shell, serve it cache-first, refresh in the background.
-const CACHE = 'tziyuron-v13';
+const CACHE = 'tziyuron-v14';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/age.js', 'js/model.js', 'js/zip.js', 'js/image.js',
