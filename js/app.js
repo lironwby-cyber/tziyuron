@@ -1391,7 +1391,7 @@ async function handleAction(act, r) {
       }
       case 'suggest-title': {
         const got = await nameDrawings([m.id], { manual: true });
-        if (!got) toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000);
+        if (!got) recogMiss('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".');
         return;
       }
       case 'animate': return chooseAnimation(m);
@@ -2633,9 +2633,23 @@ async function smallPicture(m) {
  * suggestion: it is marked as automatic, never replaces a name someone typed, and a drawing that is not
  * recognised simply stays without a name. Returns how many drawings got a name or are waiting for one.
  */
+// Why the last request to recognise a drawing came back empty, so the message says the real cause
+// (a disconnected service is not "I could not tell what is drawn").
+let recogReason = '';
+function recogMiss(fallback) {
+  const r = recogReason;
+  recogReason = '';
+  if (/^task 40[13]|not configured/.test(r)) return toast('הזיהוי לא זמין כרגע: החיבור לשירות הזיהוי נותק, וצריך לחדש אותו. בינתיים אפשר לכתוב שם ב"עריכה" ולבחור תנועה ביד.', 7000);
+  if (/busy|task 429/.test(r)) return toast('שירות הזיהוי עמוס. אפשר לנסות שוב בעוד דקה.', 5000);
+  if (/no picture|picture size/.test(r)) return toast('התמונה עוד לא עלתה לארכיון. אפשר לנסות שוב בעוד רגע.', 5000);
+  if (r === 'network') return toast('אין חיבור לשרת. אפשר לנסות שוב.', 5000);
+  return toast(fallback, 5000);
+}
+
 async function nameDrawings(ids, { manual = false } = {}) {
   const route = state.settings.titleRoute === 'free' ? 'free' : 'paid';
   if (!ids.length || !cloud.signedIn() || (state.settings.titleRoute === 'off' && !manual)) return 0;
+  recogReason = '';
   state._naming = state._naming || new Map(); // id -> time the free route was asked (0 on the paid route)
   ids.forEach((id) => state._naming.set(id, 0));
   const refresh = () => { if (!document.querySelector('.scrim') && !state.review) render(); };
@@ -2650,7 +2664,8 @@ async function nameDrawings(ids, { manual = false } = {}) {
       let res = {};
       try {
         if (m && !m.title) res = await cloud.suggestTitle(id, route === 'free' ? { route, picture: await smallPicture(m) } : {});
-      } catch { /* offline or not set up: the drawing keeps no name */ }
+      } catch { res = { reason: 'network' }; /* offline or not set up: the drawing keeps no name */ }
+      if (res.reason) recogReason = res.reason;
       if (res.queued) {
         state._naming.set(id, Date.now());
         waiting.push(id);
@@ -2722,7 +2737,8 @@ async function seekMotions(m) {
   try {
     await cloud.sync();
     res = await cloud.suggestTitle(m.id, { want: 'motions', route, picture: route === 'free' ? await smallPicture(m) : null });
-  } catch { /* offline or not set up */ }
+  } catch { res = { reason: 'network' }; }
+  recogReason = res.reason || '';
   if (res.queued) { awaitNames(); return 'waiting'; }
   state._seeking.delete(m.id);
   const fit = cleanMotions(res.motions);
@@ -2808,7 +2824,7 @@ async function chooseAnimation(m) {
       if (!m.title) return;
     } else if (step === 'auto') {
       const got = await nameDrawings([m.id], { manual: true });
-      if (!got) { toast('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".', 5000); return; }
+      if (!got) { recogMiss('לא הצלחתי לזהות מה מצויר. אפשר לכתוב שם ב"עריכה".'); return; }
       if (!m.title) return; // the free route: the name arrives in about a minute, and the toast said so
     } else if (step !== 'go') return;
   }
@@ -2818,7 +2834,7 @@ async function chooseAnimation(m) {
     const got = await seekMotions(m);
     render();
     if (got === 'waiting') { toast('ההצעות לפי הציור יהיו מוכנות בעוד כדקה. אפשר להמשיך בינתיים.', 5000); return; }
-    if (!got) toast('לא הצלחתי לזהות בציור משהו להזיז.', 5000);
+    if (!got) recogMiss('לא הצלחתי לזהות בציור משהו להזיז. אפשר להקיש על הדמות בציור כדי לבחור אותה.');
     pick = await pickMotion(m);
   }
   if (!pick || pick === 'seek') return;
