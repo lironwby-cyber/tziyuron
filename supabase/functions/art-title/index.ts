@@ -114,6 +114,10 @@ Deno.serve(async (req) => {
     if (!/^trig_[A-Za-z0-9]+$/.test(routine)) return json({ title: null, reason: 'not configured: the task id is not a task id (it starts with trig_)' });
     // Only the server can write the inbox (the caller was already checked above: the memory is theirs to read).
     const inbox = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } });
+    // Requests the task already took, or that waited too long, are cleared here (the task itself only marks
+    // a request as taken, so that its runs never need a delete).
+    await inbox.from('art_task_inbox').delete()
+      .or(`created_at.lt.${new Date(Date.now() - 5 * 60e3).toISOString()},taken_at.lt.${new Date(Date.now() - 2 * 60e3).toISOString()}`);
     const put = await inbox.from('art_task_inbox')
       .insert({ kind: onlyMotions ? 'motions' : 'title', memory_id: memory.id, payload: picture }).select('id').single();
     if (put.error || !put.data) return json({ title: null, reason: 'inbox' });

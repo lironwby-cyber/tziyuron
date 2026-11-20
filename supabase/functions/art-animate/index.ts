@@ -49,6 +49,10 @@ async function start(jobId: string) {
   if (!routine || !token) return fail(jobId, 'the scheduled task is not connected yet', { fired_at: null });
 
   const payload = `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}${motion ? `\nmotion: ${motion}` : ''}`;
+  // Requests the task already took, or that waited too long, are cleared here (the task itself only marks
+  // a request as taken, so that its runs never need a delete).
+  await db.from('art_task_inbox').delete()
+    .or(`created_at.lt.${new Date(Date.now() - 5 * 60e3).toISOString()},taken_at.lt.${new Date(Date.now() - 2 * 60e3).toISOString()}`);
   const put = await db.from('art_task_inbox').insert({ kind: 'animate', job_id: job.id, payload });
   if (put.error) return fail(jobId, 'the request could not be left for the scheduled task', { fired_at: null });
 
