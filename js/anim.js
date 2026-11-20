@@ -3,9 +3,18 @@
 // fits what is drawn (the figure is lifted from the page and moves on it), and can be recorded to a 5 second clip.
 import { openSheet, esc, toast } from './ui.js';
 import { decode } from './scan.js';
-import { pose } from './motion.js';
+import { pose, inkRegion, DIRECTED } from './motion.js';
+import { playFx, soundOn, setSound, stopAll, FX } from './sfx.js';
 
-const W = 720, H = 900, SECONDS = 5, FPS = 30;
+const SECONDS = 5, FPS = 30;
+
+/** The stage follows the drawing: wide for a wide drawing, tall for a tall one, square in between. */
+export function stageSize(w, h) {
+  const r = w / h;
+  if (r > 1.15) return { W: 900, H: 720 };
+  if (r < 0.87) return { W: 720, H: 900 };
+  return { W: 810, H: 810 };
+}
 
 export const STYLES = [
   { id: 'boil', label: 'קווים חיים' },
@@ -22,6 +31,7 @@ function noise(i, seed) {
 
 /** Draw one frame. `base` is a W×H canvas holding the drawing on white. t in seconds. */
 export function drawFrame(g, base, style, t, sparkle) {
+  const W = base.width, H = base.height;
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.fillStyle = '#fff';
   g.fillRect(0, 0, W, H);
@@ -74,6 +84,7 @@ export function drawFrame(g, base, style, t, sparkle) {
 
 async function makeBase(blob) {
   const src = await decode(blob);
+  const { W, H } = stageSize(src.width, src.height);
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d');
@@ -89,6 +100,36 @@ async function makeBase(blob) {
 }
 
 /**
+ * The colour of the paper: the middle value along the edge of the drawing. Null when the edge is not even
+ * (a photo, a painted background), so nothing can be lifted cleanly from it.
+ */
+function paperOf(d, W, R) {
+  const ring = [[], [], []];
+  const sample = (x, y) => { const i = (y * W + x) * 4; ring[0].push(d[i]); ring[1].push(d[i + 1]); ring[2].push(d[i + 2]); };
+  const inset = 5;
+  for (let x = R.x + inset; x < R.x + R.w - inset; x += 6) { sample(x, R.y + inset); sample(x, R.y + R.h - inset - 1); }
+  for (let y = R.y + inset; y < R.y + R.h - inset; y += 6) { sample(R.x + inset, y); sample(R.x + R.w - inset - 1, y); }
+  if (!ring[0].length) return null;
+  const paper = ring.map((c) => [...c].sort((a, b) => a - b)[c.length >> 1]);
+  let near = 0;
+  for (let i = 0; i < ring[0].length; i++) {
+    if (Math.max(Math.abs(ring[0][i] - paper[0]), Math.abs(ring[1][i] - paper[1]), Math.abs(ring[2][i] - paper[2])) < 40) near++;
+  }
+  return near / ring[0].length < 0.72 ? null : paper;
+}
+
+/** The box (0 to 1 of the drawing) of the figure a finger touched at (x, y) on the stage, or null. */
+export function figureAt(base, x, y) {
+  const W = base.width, H = base.height;
+  const R = base.rect || { x: 0, y: 0, w: W, h: H };
+  if (x < R.x || y < R.y || x >= R.x + R.w || y >= R.y + R.h) return null;
+  const d = base.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const paper = paperOf(d, W, R);
+  if (!paper) return null;
+  return inkRegion(d, W, R, paper, Math.round(x), Math.round(y));
+}
+
+/**
  * Separate the figure that moves from the page it is drawn on.
  * On even paper the ink inside `box` (0 to 1 of the drawing; the whole drawing when there is no box) is lifted
  * into a see-through cut-out and wiped from the page behind it. When the page is not even (a photo, a painted
@@ -96,6 +137,7 @@ async function makeBase(blob) {
  * Returns { cut, bg, sprite, f: {cx, cy, w, h} }.
  */
 export function buildFigure(base, box) {
+  const W = base.width, H = base.height;
   const R = base.rect || { x: 0, y: 0, w: W, h: H };
   const g = base.getContext('2d', { willReadFrequently: true });
   const img = g.getImageData(0, 0, W, H);
@@ -112,19 +154,8 @@ export function buildFigure(base, box) {
     bgg.fillRect(0, 0, W, H);
     return { cut: false, bg, sprite, f: { cx: R.x + R.w / 2, cy: R.y + R.h / 2, w: sprite.width, h: sprite.height } };
   };
-  // The colour of the paper: the middle value along the edge of the drawing.
-  const ring = [[], [], []];
-  const sample = (x, y) => { const i = (y * W + x) * 4; ring[0].push(d[i]); ring[1].push(d[i + 1]); ring[2].push(d[i + 2]); };
-  const inset = 5;
-  for (let x = R.x + inset; x < R.x + R.w - inset; x += 6) { sample(x, R.y + inset); sample(x, R.y + R.h - inset - 1); }
-  for (let y = R.y + inset; y < R.y + R.h - inset; y += 6) { sample(R.x + inset, y); sample(R.x + R.w - inset - 1, y); }
-  if (!ring[0].length) return whole();
-  const paper = ring.map((c) => [...c].sort((a, b) => a - b)[c.length >> 1]);
-  let near = 0;
-  for (let i = 0; i < ring[0].length; i++) {
-    if (Math.max(Math.abs(ring[0][i] - paper[0]), Math.abs(ring[1][i] - paper[1]), Math.abs(ring[2][i] - paper[2])) < 40) near++;
-  }
-  if (near / ring[0].length < 0.72) return whole();
+  const paper = paperOf(d, W, R);
+  if (!paper) return whole();
 
   const b = box || [0, 0, 1, 1];
   const grow = box ? 0.02 : 0;
@@ -144,7 +175,7 @@ export function buildFigure(base, box) {
   const sg = sprite.getContext('2d');
   const out = sg.createImageData(sw, sh);
   // The page behind the figure is wiped a little wider than the ink, so that no pale outline stays behind.
-  const pad = 3, ex0 = Math.max(0, minX - pad), ey0 = Math.max(0, minY - pad), ex1 = Math.min(W, maxX + 1 + pad), ey1 = Math.min(H, maxY + 1 + pad);
+  const pad = 6, ex0 = Math.max(0, minX - pad), ey0 = Math.max(0, minY - pad), ex1 = Math.min(W, maxX + 1 + pad), ey1 = Math.min(H, maxY + 1 + pad);
   const ew = ex1 - ex0, eh = ey1 - ey0;
   const ink = new Uint8Array(ew * eh), wide = new Uint8Array(ew * eh);
   for (let y = 0; y < sh; y++) {
@@ -153,7 +184,7 @@ export function buildFigure(base, box) {
       const f = far(i);
       const a = f <= 20 ? 0 : f >= 52 ? 255 : Math.round((f - 20) / 32 * 255);
       out.data[o] = d[i]; out.data[o + 1] = d[i + 1]; out.data[o + 2] = d[i + 2]; out.data[o + 3] = a;
-      if (f > 14) ink[(y + minY - ey0) * ew + x + minX - ex0] = 1;
+      if (f > 10) ink[(y + minY - ey0) * ew + x + minX - ex0] = 1;
     }
   }
   for (let y = 0; y < eh; y++) {
@@ -178,14 +209,97 @@ export function buildFigure(base, box) {
   return { cut: true, bg, sprite, f: { cx: minX + sw / 2, cy: minY + sh / 2, w: sw, h: sh } };
 }
 
-/** Draw one frame of a figure that moves on its page. `m` = { motion, dir }, t in seconds. */
-export function drawFigureFrame(g, fig, m, t, sparkle) {
+// What is around the figure, by its movement: sky for what flies, water for what swims, a road for what drives.
+const SCENES = { fly: 'sky', glide: 'sky', rise: 'sky', swim: 'water', float: 'water', drive: 'road', walk: 'ground', jump: 'ground', sway: 'wind', spin: 'stars', twinkle: 'stars', fall: 'ground' };
+export function sceneOf(motion) { return SCENES[motion] || ''; }
+
+/** A soft backdrop behind the moving figure. Every element is placed by the moment p of the loop, so the loop closes. */
+function drawScene(g, scene, p, f, W, H, sign, pass) {
+  const T = Math.PI * 2;
+  g.save();
+  if (scene === 'sky') {
+    g.fillStyle = 'rgba(150, 196, 240, .30)';
+    for (let k = 0; k < 4; k++) {
+      const speed = k % 2 ? 1 : 2; // whole passes per loop
+      const x = ((((k * 0.29 + 0.1) - p * speed * sign) % 1) + 1) % 1 * (W + 240) - 120;
+      const y = H * (0.1 + 0.2 * k) + Math.sin(T * p + k) * 6;
+      const s = 0.7 + 0.15 * k;
+      g.beginPath(); // one path for the whole cloud, so the puffs do not darken where they overlap
+      for (const [ox, oy, r] of [[0, 0, 34], [32, -14, 40], [66, 2, 30], [30, 12, 34]]) {
+        g.moveTo(x + ox * s + r * s, y + oy * s);
+        g.arc(x + ox * s, y + oy * s, r * s, 0, T);
+      }
+      g.fill();
+    }
+  } else if (scene === 'water') {
+    g.strokeStyle = 'rgba(60, 140, 220, .5)';
+    g.lineWidth = 3;
+    for (let k = 0; k < 12; k++) {
+      const speed = 1 + (k % 2);
+      const q = ((k * 0.137 + p * speed) % 1);
+      const y = H + 20 - q * (H + 40);
+      const x = W * ((k * 0.383 + 0.07) % 1) + Math.sin(T * (q * 3 + k * 0.2)) * 10;
+      const r = 6 + (k % 4) * 3;
+      g.beginPath(); g.arc(x, y, r, 0, T); g.stroke();
+    }
+  } else if (scene === 'road' || scene === 'ground') {
+    const y = Math.min(H - 10, f.cy + f.h / 2 + 8);
+    g.strokeStyle = 'rgba(90, 80, 120, .28)';
+    g.lineWidth = 4;
+    g.lineCap = 'round';
+    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+    if (scene === 'road') {
+      const step = W / 8, shift = pass ? (p * 4 * step * -sign) % step : 0; // the road runs only under a car that drives across
+      g.lineWidth = 5;
+      for (let x = -step + shift; x < W + step; x += step) { g.beginPath(); g.moveTo(x, y + 14); g.lineTo(x + step * 0.45, y + 14); g.stroke(); }
+    } else {
+      g.strokeStyle = 'rgba(70, 150, 80, .45)';
+      g.lineWidth = 3;
+      for (let k = 0; k < 14; k++) {
+        const x = W * ((k * 0.071 + 0.03) % 1);
+        const lean = Math.sin(T * 2 * p + k) * 3;
+        g.beginPath(); g.moveTo(x, y); g.lineTo(x - 5 + lean, y - 12); g.moveTo(x, y); g.lineTo(x + 5 + lean, y - 10); g.stroke();
+      }
+    }
+  } else if (scene === 'wind') {
+    g.strokeStyle = 'rgba(110, 160, 220, .45)';
+    g.lineWidth = 3;
+    g.lineCap = 'round';
+    for (let k = 0; k < 5; k++) {
+      const x = (((k * 0.23 + p * 2) % 1)) * (W + 200) - 100;
+      const y = H * (0.18 + 0.15 * k);
+      g.beginPath(); g.moveTo(x, y);
+      g.bezierCurveTo(x + 30, y - 12, x + 60, y + 12, x + 90, y);
+      g.stroke();
+    }
+  } else if (scene === 'stars') {
+    g.fillStyle = 'rgba(245, 185, 40, .85)';
+    for (let k = 0; k < 9; k++) {
+      const a = Math.max(0, Math.sin(T * (2 * p + k / 9)));
+      if (a < 0.05) continue;
+      const x = W * ((k * 0.317 + 0.09) % 1), y = H * ((k * 0.571 + 0.13) % 1), r = 4 + 9 * a;
+      g.beginPath();
+      for (let i = 0; i < 8; i++) { const ang = i * Math.PI / 4, rr = i % 2 ? r * 0.35 : r; g.lineTo(x + Math.cos(ang) * rr, y + Math.sin(ang) * rr); }
+      g.closePath(); g.fill();
+    }
+  }
+  g.restore();
+}
+
+/**
+ * Draw one frame of a figure that moves on its page. `m` = { motion, dir }, t in seconds.
+ * opts.scene: the backdrop that fits the movement is drawn behind the figure (only on even paper).
+ */
+export function drawFigureFrame(g, fig, m, t, sparkle, { scene = false } = {}) {
+  const W = fig.bg.width, H = fig.bg.height;
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.globalAlpha = 1;
   g.drawImage(fig.bg, 0, 0);
   const p = (t % SECONDS) / SECONDS;
   const f = fig.f;
   const ps = pose(m.motion, p, f, W, H, m.dir);
+  const sign = m.dir === 'left' ? -1 : 1;
+  if (scene && fig.cut) drawScene(g, sceneOf(m.motion), p, f, W, H, sign, !!ps.wrapX);
   const bottom = ps.anchor === 'bottom';
   if (m.motion === 'jump') {
     // A soft shadow that shrinks as the figure leaves the ground.
@@ -195,11 +309,20 @@ export function drawFigureFrame(g, fig, m, t, sparkle) {
     g.ellipse(f.cx, Math.min(H - 8, f.cy + f.h / 2 + 4), f.w * 0.36 * (1 - lift * 0.35), Math.max(4, f.h * 0.035), 0, 0, Math.PI * 2);
     g.fill();
   }
+  if (ps.glow > 0.01) {
+    // The light around what twinkles: a warm halo that swells and fades with the beat.
+    const r = Math.max(f.w, f.h) * (0.62 + 0.18 * ps.glow);
+    const halo = g.createRadialGradient(f.cx, f.cy, r * 0.15, f.cx, f.cy, r);
+    halo.addColorStop(0, `rgba(255, 214, 90, ${0.55 * ps.glow})`);
+    halo.addColorStop(1, 'rgba(255, 214, 90, 0)');
+    g.fillStyle = halo;
+    g.fillRect(f.cx - r, f.cy - r, r * 2, r * 2);
+  }
   const one = (ox, oy) => {
     g.save();
     g.translate(f.cx + ps.dx + ox, f.cy + (bottom ? f.h / 2 : 0) + ps.dy + oy);
     g.rotate(ps.rot);
-    g.scale(ps.sx, ps.sy);
+    g.scale(Math.abs(ps.sx) < 0.04 ? 0.04 * Math.sign(ps.sx || 1) : ps.sx, ps.sy);
     const top = bottom ? -f.h : -f.h / 2;
     if (ps.wave) {
       const strip = 6;
@@ -241,59 +364,115 @@ export function recorderMime() {
 }
 
 /**
- * Opens the animator. Resolves {blob, style, duration} when a clip was saved, otherwise null.
- * `motions` = movements that fit this drawing ({label, motion, box, dir}); `first` = the one chosen (its place in the list).
+ * Opens the animator. Resolves {blob, style, label, duration, fx, scene, motions, picked} when a clip was saved,
+ * otherwise null. `motions` = movements that fit this drawing ({label, motion, box, dir}); `first` = the one chosen.
+ * A touch on the stage picks the figure that moves; `picked` says the boxes in `motions` were set that way.
  */
 export async function openAnimator(imageBlob, title, { motions = [], first = 0 } = {}) {
   let base, sparkle;
   try { [base, sparkle] = await Promise.all([makeBase(imageBlob), loadSparkle()]); } catch { toast('לא הצלחתי לפתוח את הציור'); return null; }
+  const W = base.width, H = base.height;
   const mime = recorderMime();
+  const list = motions.map((m) => ({ ...m }));
   const figures = new Map();
   const figureFor = (i) => {
-    if (!figures.has(i)) { try { figures.set(i, buildFigure(base, motions[i].box)); } catch { figures.set(i, null); } }
+    if (!figures.has(i)) { try { figures.set(i, buildFigure(base, list[i].box)); } catch { figures.set(i, null); } }
     return figures.get(i);
   };
+  const even = (() => { try { return buildFigure(base, null).cut; } catch { return false; } })();
+  let scene = true, picked = false;
   return openSheet((body, close) => {
-    let style = motions.length ? 'm' + Math.min(Math.max(first, 0), motions.length - 1) : STYLES[0].id;
-    let raf = 0, start = performance.now(), recording = false;
+    let style = list.length ? 'm' + Math.min(Math.max(first, 0), list.length - 1) : STYLES[0].id;
+    let raf = 0, start = performance.now(), recording = false, lastLoop = -1;
+    const fitIndex = () => (/^m\d+$/.test(style) ? Number(style.slice(1)) : -1);
     body.innerHTML = `
       <h2>הנפשה של ${esc(title)}</h2>
-      <div class="anim-stage"><canvas width="${W}" height="${H}" aria-label="תצוגה מקדימה של ההנפשה"></canvas></div>
-      <div class="anim-styles" role="group" aria-label="סגנון תנועה" style="margin:14px 0">
-        ${motions.map((m, i) => `<button type="button" class="fit" data-style="m${i}" aria-pressed="${style === 'm' + i}">${esc(m.label)}</button>`).join('')}
-        ${STYLES.map((s) => `<button type="button" data-style="${s.id}" aria-pressed="${s.id === style}">${esc(s.label)}</button>`).join('')}
+      <div class="anim-stage" style="aspect-ratio:${W} / ${H}"><canvas width="${W}" height="${H}" aria-label="תצוגה מקדימה של ההנפשה"></canvas></div>
+      ${even ? '<p class="small muted anim-hint">הקישו על הדמות בציור כדי לבחור מה יזוז.</p>' : ''}
+      <div class="anim-styles" role="group" aria-label="סגנון תנועה" data-chips style="margin:12px 0 10px"></div>
+      <div class="anim-toggles" role="group" aria-label="תוספות">
+        <button type="button" data-scene aria-pressed="true">רקע מתאים</button>
+        <button type="button" data-sound aria-pressed="${soundOn()}">צליל</button>
+        <button type="button" data-dir hidden>החלפת כיוון ⇄</button>
       </div>
-      <p class="small muted" style="text-align:center;margin-bottom:12px">ההנפשה נוצרת כאן במכשיר. הציור לא נשלח לשום מקום.</p>
+      <p class="small muted" style="text-align:center;margin:10px 0 12px">ההנפשה נוצרת כאן במכשיר. הציור לא נשלח לשום מקום. הצליל מתנגן באפליקציה ולא נשמר בסרטון.</p>
       <div class="btn-row" style="justify-content:space-between">
         <button type="button" class="btn ghost" data-cancel>ביטול</button>
         <button type="button" class="btn violet" data-save ${mime ? '' : 'disabled'}>${mime ? 'שמירה כסרטון של 5 שניות' : 'הדפדפן הזה לא מקליט וידאו'}</button>
       </div>`;
     const canvas = body.querySelector('canvas');
     const g = canvas.getContext('2d');
+    const chips = body.querySelector('[data-chips]');
+    const dirBtn = body.querySelector('[data-dir]');
+    const sceneBtn = body.querySelector('[data-scene]');
+    const drawChips = () => {
+      chips.innerHTML = `${list.map((m, i) => `<button type="button" class="fit" data-style="m${i}" aria-pressed="${style === 'm' + i}">${esc(m.label)}</button>`).join('')}
+        ${STYLES.map((x) => `<button type="button" data-style="${x.id}" aria-pressed="${x.id === style}">${esc(x.label)}</button>`).join('')}`;
+      const i = fitIndex();
+      dirBtn.hidden = !(i >= 0 && DIRECTED.includes(list[i].motion));
+      sceneBtn.hidden = !(i >= 0 && even && sceneOf(list[i].motion));
+    };
+    drawChips();
+    const restart = () => { start = performance.now(); lastLoop = -1; stopAll(); };
     const paint = (t) => {
-      const i = style[0] === 'm' && /^m\d+$/.test(style) ? Number(style.slice(1)) : -1;
+      const i = fitIndex();
       const fig = i >= 0 ? figureFor(i) : null;
-      if (fig) drawFigureFrame(g, fig, motions[i], t, sparkle);
+      if (fig) drawFigureFrame(g, fig, list[i], t, sparkle, { scene });
       else drawFrame(g, base, i >= 0 ? 'float' : style, t, sparkle);
       canvas.dataset.cut = fig ? String(fig.cut) : '';
+      const loop = Math.floor(t / SECONDS);
+      if (loop !== lastLoop) { lastLoop = loop; if (i >= 0 && !recording) playFx(list[i].motion); }
     };
-    const loop = (now) => {
+    const tick = (now) => {
       paint((now - start) / 1000);
-      raf = requestAnimationFrame(loop);
+      raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(loop);
-    const stop = (v) => { cancelAnimationFrame(raf); close(v); };
+    raf = requestAnimationFrame(tick);
+    const stop = (v) => { cancelAnimationFrame(raf); stopAll(); close(v); };
     body.querySelector('[data-cancel]').addEventListener('click', () => { if (!recording) stop(null); });
     body.addEventListener('click', (e) => {
+      if (recording) return;
       const b = e.target.closest('[data-style]');
-      if (!b || recording) return;
-      style = b.dataset.style;
-      start = performance.now();
-      body.querySelectorAll('[data-style]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      if (b) { style = b.dataset.style; restart(); drawChips(); return; }
+      if (e.target.closest('[data-scene]')) { scene = !scene; sceneBtn.setAttribute('aria-pressed', String(scene)); return; }
+      if (e.target.closest('[data-sound]')) {
+        const on = !soundOn();
+        setSound(on);
+        e.target.closest('[data-sound]').setAttribute('aria-pressed', String(on));
+        if (on) restart();
+        return;
+      }
+      if (e.target.closest('[data-dir]')) {
+        const i = fitIndex();
+        if (i < 0) return;
+        list[i].dir = list[i].dir === 'left' ? 'right' : 'left';
+        restart();
+      }
+    });
+    // A touch on the drawing picks the figure that moves.
+    canvas.addEventListener('click', (e) => {
+      if (recording || !even) return;
+      const r = canvas.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width * W, y = (e.clientY - r.top) / r.height * H;
+      const box = figureAt(base, x, y);
+      if (!box) { toast('כאן אין ציור. אפשר להקיש על הקו של הדמות עצמה.'); return; }
+      let i = fitIndex();
+      if (i >= 0) list[i] = { ...list[i], box };
+      else {
+        list.push({ label: 'הדמות שבחרתי', motion: 'jump', box });
+        i = list.length - 1;
+        style = 'm' + i;
+      }
+      figures.delete(i);
+      picked = true;
+      restart();
+      drawChips();
+      toast('הדמות נבחרה');
     });
     body.querySelector('[data-save]').addEventListener('click', async (e) => {
       if (recording || !mime) return;
       recording = true;
+      stopAll();
       const btn = e.currentTarget;
       btn.disabled = true;
       btn.textContent = 'מקליט…';
@@ -310,8 +489,12 @@ export async function openAnimator(imageBlob, title, { motions = [], first = 0 }
       stream.getTracks().forEach((t) => t.stop());
       const blob = new Blob(chunks, { type: mime.split(';')[0] });
       if (!blob.size) { toast('ההקלטה לא הצליחה'); recording = false; btn.disabled = false; btn.textContent = 'שמירה כסרטון של 5 שניות'; return; }
-      const i = /^m\d+$/.test(style) ? Number(style.slice(1)) : -1;
-      stop({ blob, style: i >= 0 ? motions[i].motion : style, label: i >= 0 ? motions[i].label : '', duration: SECONDS });
+      const i = fitIndex();
+      const m = i >= 0 ? list[i] : null;
+      stop({
+        blob, style: m ? m.motion : style, label: m ? m.label : '', duration: SECONDS,
+        fx: m && FX.includes(m.motion) ? m.motion : '', motions: list, picked,
+      });
     });
   }, { label: 'הנפשה' });
 }

@@ -10,6 +10,7 @@ import { openCamera, cameraSupported } from './camera.js';
 import { openCropEditor } from './crop.js';
 import { recordAudio } from './recorder.js';
 import { openAnimator } from './anim.js';
+import { playFx } from './sfx.js';
 import * as cloud from './cloud.js';
 import { suggestFromTitle, cleanMotions, turnMotions } from './motion.js';
 import { waPhone, nameList, inviteMessage, waLink, inviteState, pickedContact } from './share.js';
@@ -385,8 +386,9 @@ function renderMemory(id) {
     ${m.caption ? `<div class="bubble">${esc(m.caption)}</div>` : ''}
     ${atts.length ? `<div class="voices">${atts.map((a, i) => (a.kind === 'voice'
       ? voiceRowHtml(a.blob, a.duration, a.id, `השמעת הקלטה ${i + 1}`)
-      : `<div class="voice video"><video controls playsinline preload="metadata" ${a.kind === 'animation' ? 'loop' : ''} data-blob="${esc(a.blob)}"></video>
+      : `<div class="voice video"><video controls playsinline preload="metadata" ${a.kind === 'animation' ? 'loop data-anim' : ''} ${a.fx ? `data-fx="${esc(a.fx)}"` : ''} data-blob="${esc(a.blob)}"></video>
           <div class="row"><button class="icon-btn" data-del-att="${esc(a.id)}" aria-label="מחיקת הסרטון">${ICONS.trash}</button></div></div>`)).join('')}</div>` : ''}
+    ${atts.some((a) => a.kind === 'animation') && atts.some((a) => a.kind === 'voice') ? `<button class="btn violet anim-voice" data-act="anim-voice">${ICONS.play}ההנפשה עם הקול של ${esc(child ? child.name : 'הילד')}</button>` : ''}
     ${animStatusHtml(m)}
     ${canAttach ? `<div class="doers">
       <button class="doer" data-act="rec-voice">${art('mic')}הקלטת קול</button>
@@ -723,13 +725,19 @@ function renderKids(r) {
   </main>`;
 }
 
+/** The sound effect of a saved animation, when it was made with one. */
+function clipFx(m, clip) {
+  const a = (m.attachments || []).find((x) => x.blob === clip);
+  return a && a.kind === 'animation' && a.fx ? a.fx : '';
+}
+
 function renderKidView(list, i, child) {
   const m = list[i];
   const clip = kidClip(m);
   const showClip = clip && (state._kidClip === m.id || !m.image);
   const voices = kidVoices(m);
   const stage = showClip
-    ? `<video data-blob="${esc(clip)}" ${m.image ? `data-poster="${esc(m.image)}"` : ''} autoplay loop playsinline controls></video>`
+    ? `<video data-blob="${esc(clip)}" ${m.image ? `data-poster="${esc(m.image)}"` : ''} ${clipFx(m, clip) ? `data-fx="${esc(clipFx(m, clip))}"` : ''} autoplay loop playsinline controls></video>`
     : `<img data-blob="${esc(m.image)}" alt="${esc(m.title || 'ציור')}">`;
   return `<div class="kid-view" style="${kidVars(child)}">
     <div class="kid-bar">
@@ -772,7 +780,12 @@ function kidClick(t) {
   if (t.closest('[data-kid-close]')) { state._kidClip = null; go('', { replace: true }); return; }
   const step = t.closest('[data-kid-step]');
   if (step) { kidStep(Number(step.dataset.kidStep)); return; }
-  if (t.closest('[data-kid-clip]')) { state._kidClip = state._kidClip === route().id ? null : route().id; render(); return; }
+  if (t.closest('[data-kid-clip]')) {
+    state._kidClip = state._kidClip === route().id ? null : route().id;
+    // The drawing moves and the child's own voice tells about it, together.
+    render().then(() => { const row = $('.kid-voices [data-voice]'); if (state._kidClip && row) togglePlay(row); });
+    return;
+  }
   const playBtn = t.closest('[data-play]');
   if (playBtn) togglePlay(playBtn.closest('[data-voice]'));
 }
@@ -795,6 +808,20 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') kidStep(1);
   else if (e.key === 'ArrowRight') kidStep(-1);
 });
+
+// A saved animation made with a sound effect plays it at the start of every loop.
+document.addEventListener('play', (e) => {
+  const v = e.target;
+  if (!(v instanceof HTMLVideoElement) || !v.dataset.fx) return;
+  v._fxAt = v.currentTime;
+  playFx(v.dataset.fx);
+}, true);
+document.addEventListener('timeupdate', (e) => {
+  const v = e.target;
+  if (!(v instanceof HTMLVideoElement) || !v.dataset.fx || v.paused) return;
+  if (v.currentTime + 0.5 < (v._fxAt || 0)) playFx(v.dataset.fx);
+  v._fxAt = v.currentTime;
+}, true);
 
 // ---------- Settings ----------
 function familyPanelHtml() {
@@ -1085,7 +1112,7 @@ function renderSettings() {
         : 'אין פרסומות ואין מעקב. בלי כניסה לשיתוף המשפחתי, התמונות, ההקלטות והשמות נשארים בדפדפן במכשיר שלך, ויוצאים ממנו רק כשמשתפים או מגבים.'}</p>
       <button class="btn danger" data-act="wipe">מחיקת כל הנתונים</button>
     </div>
-    <p class="small muted" style="text-align:center">ציורון · גרסה 2.10.2</p>
+    <p class="small muted" style="text-align:center">ציורון · גרסה 2.11</p>
   </main>`;
 }
 
@@ -1368,6 +1395,20 @@ async function handleAction(act, r) {
         return;
       }
       case 'animate': return chooseAnimation(m);
+      case 'anim-voice': {
+        // The newest animation plays from its start while the first recording of the child is heard.
+        const vids = $$('video[data-anim]', APP);
+        const video = vids[vids.length - 1];
+        const row = $('.voices [data-voice]', APP);
+        if (!video || !row) return;
+        const audio = row.querySelector('audio');
+        video.currentTime = 0;
+        video.play().catch(() => {});
+        video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (audio.paused) togglePlay(row);
+        audio.addEventListener('ended', () => video.pause(), { once: true });
+        return;
+      }
       case 'anim-clear': {
         const { anim, ...rest } = m;
         const updated = { ...rest, updatedAt: Date.now() };
@@ -2229,8 +2270,10 @@ async function animateMemory(m, { motions = [], first = 0 } = {}) {
   const res = await openAnimator(rec.blob, m.title || 'ציור', { motions, first });
   if (!res) return;
   const b = blobRecord(res.blob, 'video', { memoryId: m.id });
-  const att = { id: uid(), kind: 'animation', style: res.style, ...(res.label ? { label: res.label } : {}), blob: b.id, duration: res.duration, createdAt: Date.now() };
+  const att = { id: uid(), kind: 'animation', style: res.style, ...(res.label ? { label: res.label } : {}), ...(res.fx ? { fx: res.fx } : {}), blob: b.id, duration: res.duration, createdAt: Date.now() };
   const updated = { ...m, attachments: [...(m.attachments || []), att], updatedAt: Date.now() };
+  // A figure picked by a touch is remembered, so the next animation of this drawing moves the same figure.
+  if (res.picked) { const kept = cleanMotions(res.motions); if (kept.length) updated.motions = kept; }
   await db.putMany([['blobs', b], ['memories', updated]]);
   Object.assign(m, updated);
   toast('ההנפשה נשמרה ליד הציור');

@@ -169,6 +169,30 @@ try {
     assert.notEqual(f1.sum, f2.sum, 'the figure moved');
     assert.equal(f1.corner, f2.corner, 'the page did not move');
     await shot('05d-animate-fit');
+    // The stage follows the drawing's shape, and there are a backdrop, a sound and a way to pick the figure.
+    const stage = await canvas.evaluate((c) => [c.width, c.height]);
+    assert.ok([[720, 900], [900, 720], [810, 810]].some(([w, h]) => w === stage[0] && h === stage[1]), `stage ${stage}`);
+    assert.equal(await page.getByRole('button', { name: 'רקע מתאים' }).getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: 'צליל' }).waitFor();
+    await page.getByText('הקישו על הדמות בציור כדי לבחור מה יזוז.').waitFor();
+    // With a movement that stays in place, a touch on another figure picks it instead.
+    await page.getByRole('button', { name: 'הירח זוהר' }).click();
+    await page.waitForTimeout(200);
+    const picked = await canvas.evaluate((c) => {
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      for (let y = 20; y < c.height * 0.4; y += 4) for (let x = 20; x < c.width - 20; x += 4) {
+        const i = (y * c.width + x) * 4; if (d[i] + d[i + 1] + d[i + 2] < 450) return [x / c.width, y / c.height];
+      }
+      return null;
+    });
+    assert.ok(picked, 'there is ink in the top part of the drawing');
+    const box = await canvas.boundingBox();
+    await page.mouse.click(box.x + picked[0] * box.width, box.y + picked[1] * box.height);
+    await page.getByText('הדמות נבחרה').waitFor();
+    await page.mouse.click(box.x + box.width * 0.5, box.y + box.height - 6); // the white margin under the drawing
+    await page.getByText('כאן אין ציור. אפשר להקיש על הקו של הדמות עצמה.').waitFor();
+    await page.waitForTimeout(400);
+    await shot('05e-animate-picked');
     await page.getByRole('button', { name: 'מרחף' }).click();
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'הירח זוהר' }).click();
@@ -184,7 +208,12 @@ try {
     });
     assert.ok(v.size > 20000, `clip size ${v.size}`);
     assert.match(v.type, /video/);
-    assert.equal(v.w, 720); assert.equal(v.h, 900);
+    assert.deepEqual([v.w, v.h], stage, 'the clip has the size of the stage, which follows the drawing');
+    // The drawing has a recording of the child: the animation can be played together with it.
+    await page.getByRole('button', { name: /ההנפשה עם הקול של/ }).click();
+    await page.waitForFunction(() => !document.querySelector('[data-voice] audio').paused && !document.querySelector('video[data-anim]').paused, null, { timeout: 5000 });
+    await shot('05f-anim-voice');
+    await page.getByRole('button', { name: 'השמעת הקלטה 1' }).click();
   });
 
   await check('scan with the live camera: sheet detected in the viewfinder', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MOTIONS, suggestFromTitle, cleanMotions, turnBox, turnMotions, pose } from '../../js/motion.js';
+import { MOTIONS, suggestFromTitle, cleanMotions, turnBox, turnMotions, pose, facing, inkRegion } from '../../js/motion.js';
 
 test('a name with a known thing gets the movement that fits it', () => {
   assert.deepEqual(suggestFromTitle('פרפר צבעוני'), [{ label: 'הפרפר עף', motion: 'fly' }]);
@@ -83,4 +83,46 @@ test('every movement starts where the figure was drawn and closes its loop', () 
       }
     }
   }
+});
+
+test('a figure that goes back and forth faces the way it moves, and turns around at the ends', () => {
+  const f = { cx: 360, cy: 450, w: 160, h: 120 };
+  for (const motion of ['fly', 'glide', 'swim', 'walk', 'float']) {
+    for (const dir of [undefined, 'right', 'left']) {
+      const sign = dir === 'left' ? -1 : 1;
+      for (let i = 1; i < 40; i++) {
+        const p = i / 40;
+        const a = pose(motion, p, f, 720, 900, dir), b = pose(motion, p + 0.002, f, 720, 900, dir);
+        const v = (b.dx - a.dx) * sign; // > 0: moving the way the figure was drawn facing
+        if (Math.abs(v) > 0.3) assert.equal(Math.sign(a.sx), Math.sign(v), `${motion} ${dir} at ${p} faces its way`);
+      }
+      assert.ok(Math.abs(pose(motion, 0.25, f, 720, 900, dir).sx) < 0.05, `${motion} turns around at the far end`);
+    }
+  }
+  assert.equal(facing(0), 1);
+  assert.equal(facing(0.5), -1);
+});
+
+test('the twinkle really glows, and the glow closes its loop', () => {
+  const f = { cx: 360, cy: 450, w: 100, h: 100 };
+  const glows = Array.from({ length: 81 }, (_, i) => pose('twinkle', i / 80, f, 720, 900).glow);
+  assert.ok(Math.max(...glows) > 0.95);
+  assert.ok(glows[0] < 1e-9 && glows[80] < 1e-9);
+});
+
+test('a touch picks the strokes of one figure', () => {
+  const W = 200, H = 100;
+  const d = new Uint8ClampedArray(W * H * 4).fill(255);
+  const dot = (x, y) => { const i = (y * W + x) * 4; d[i] = 30; d[i + 1] = 30; d[i + 2] = 200; };
+  // A figure on the left made of two strokes 5 px apart, and a separate one on the right.
+  for (let y = 20; y < 60; y++) { dot(30, y); dot(36, y); }
+  for (let x = 30; x < 37; x++) dot(x, 60);
+  for (let y = 30; y < 50; y++) for (let x = 150; x < 170; x++) dot(x, y);
+  const R = { x: 0, y: 0, w: W, h: H };
+  const left = inkRegion(d, W, R, [255, 255, 255], 33, 40);
+  assert.ok(left[0] <= 30 / W && left[0] + left[2] >= 37 / W, 'both strokes are in the box');
+  assert.ok(left[0] + left[2] < 0.5, 'the figure on the right is not');
+  const near = inkRegion(d, W, R, [255, 255, 255], 140, 40); // a touch beside the right figure
+  assert.ok(near[0] >= 0.72 && near[0] <= 0.76);
+  assert.equal(inkRegion(d, W, R, [255, 255, 255], 100, 95), null, 'nothing is drawn near the touch');
 });
