@@ -48,6 +48,10 @@ async function start(jobId: string) {
   const token = Deno.env.get('ART_ROUTINE_TOKEN');
   if (!routine || !token) return fail(jobId, 'the scheduled task is not connected yet', { fired_at: null });
 
+  const payload = `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}${motion ? `\nmotion: ${motion}` : ''}`;
+  const put = await db.from('art_task_inbox').insert({ kind: 'animate', job_id: job.id, payload });
+  if (put.error) return fail(jobId, 'the request could not be left for the scheduled task', { fired_at: null });
+
   const res = await fetch(`https://api.anthropic.com/v1/claude_code/routines/${routine}/fire`, {
     method: 'POST',
     headers: {
@@ -55,9 +59,14 @@ async function start(jobId: string) {
       'anthropic-version': '2023-06-01', 'anthropic-beta': 'experimental-cc-routine-2026-04-01',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ text: `job_id: ${job.id}\nimage_url: ${signed.data.signedUrl}${motion ? `\nmotion: ${motion}` : ''}` }),
+    // The request waits in the task's inbox and the wake carries no text: a project's task refuses a wake
+    // with text ("this project is paused", a fault of the service), and an empty one works.
+    body: '{}',
   });
-  if (!res.ok) return fail(jobId, `the scheduled task did not start (${res.status})`, { fired_at: null });
+  if (!res.ok) {
+    await db.from('art_task_inbox').delete().eq('job_id', job.id);
+    return fail(jobId, `the scheduled task did not start (${res.status})`, { fired_at: null });
+  }
   return json({ ok: true });
 }
 
